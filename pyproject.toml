@@ -1,0 +1,14 @@
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+exclude =  ["benchmark"]
+ignore_missing_imports = true
+disallow_subclassing_any = false
+warn_return_any = false
+
+[tool.black]
+line-length = 100
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
