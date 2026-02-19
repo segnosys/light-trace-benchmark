@@ -4,7 +4,7 @@ Inference endpoint speed benchmarking tool. Measures throughput, latency, and ti
 
 ## Supported Backends
 
-`openai` | `vllm` | `sglang` | `tgi` | `together` | `fireworks` | `nvidia_nim` | `trtllm` | `embeddings`
+`openai` | `vllm` | `sglang` | `trtllm`
 
 ## Installation
 
