@@ -1,4 +1,4 @@
-# LightRace
+# LightTrace
 
 Inference endpoint speed benchmarking tool. Measures throughput, latency, and time-to-first-token across different traffic patterns and backends.
 
