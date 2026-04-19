@@ -1,0 +1,49 @@
+# Workload profile: interactive code agent — 128K-context variant.
+#
+# Sized for a 128K-context server (e.g. Qwen3-30B-A3B-NVFP4 served at 128K).
+# Per-request total stays within ~120K leaving headroom for generation.
+#
+# Traffic pattern:
+#   * Agent opens a session with a sizeable codebase / multi-file context plus
+#     a tool-instruction preamble.
+#   * Each turn the user supplies a moderate delta (diff, tool output, edit
+#     selection) and the assistant returns an edit or short explanation.
+#   * Session retires when its accumulated prompt approaches the context cap.
+#   * Arrivals are bursty — Gamma(shape=3) inter-arrivals.
+
+workload:
+  # Session context growth — target ~45K mean per-request prompt, p99 < 120K
+  system_prompt_len:     2000
+  initial_prefix_mean:   40000
+  initial_prefix_median: 34000
+  new_tokens_mean:       2500
+  new_tokens_median:     1000
+  max_prompt_tokens:     120000     # retire session past this; server cap is 128K
+
+  # Session arrival & selection
+  new_session_rate:      0.04
+  session_decay_lambda:  0.005
+  initial_sessions:      4
+
+  # Response generation
+  generation_length_mean:   500
+  generation_length_median: 280
+
+  # Traffic shape — long prompts, keep QPS modest
+  initial_qps:      0.05
+  max_qps:          0.3
+  ramp_duration:    45
+  sustain_duration: 600
+  max_inflight:     16              # matches --max-running-requests on the server
+  poisson:          true
+  poisson_shape:    3
+
+  # Speculative-decoding / metric knobs
+  acc_len:             1.0
+  mtp_overhead_factor: 1.0
+  mtp_draft_tokens:    3
+  tokenizer:           Qwen/Qwen3-30B-A3B
+  gpus:                2
+  window:              30
+
+  random_seed: 1337

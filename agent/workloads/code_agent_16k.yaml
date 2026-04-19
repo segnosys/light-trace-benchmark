@@ -1,0 +1,49 @@
+# Workload profile: interactive code agent.
+#
+# Sized for a 16K-context, 16-inflight server. Per-request total
+# (system + initial_prefix + accumulated turns + generation) stays
+# well under 16K.
+#
+# Traffic pattern:
+#   * Agent opens a session with a short tool preamble and a file snippet.
+#   * Each turn the user supplies a small delta (diff / selection / stdout)
+#     and the assistant returns a short edit or explanation.
+#   * Session retires when its prompt approaches the context cap.
+#   * Arrivals are bursty — Gamma(shape=3) inter-arrivals.
+
+workload:
+  # Session context growth (keeps totals <= ~14K, leaving room for generation)
+  system_prompt_len:     800       # tool / style preamble
+  initial_prefix_mean:   3200      # opening file / code snippet
+  initial_prefix_median: 2400      # lognormal, right-skewed
+  new_tokens_mean:       700       # avg delta per turn
+  new_tokens_median:     300       # median delta (short turns dominate)
+  max_prompt_tokens:     14000     # retire session past this
+
+  # Session arrival & selection
+  new_session_rate:      0.05
+  session_decay_lambda:  0.006     # recency bias on active sessions
+  initial_sessions:      4
+
+  # Response generation
+  generation_length_mean:   380
+  generation_length_median: 220
+
+  # Traffic shape
+  initial_qps:      0.1
+  max_qps:          0.5
+  ramp_duration:    30              # seconds to reach max_qps
+  sustain_duration: 300
+  max_inflight:     16              # server hard cap
+  poisson:          true
+  poisson_shape:    3               # Gamma shape; larger => smoother
+
+  # Speculative-decoding / metric knobs
+  acc_len:             1.0
+  mtp_overhead_factor: 1.0
+  mtp_draft_tokens:    3
+  tokenizer:           Qwen/Qwen3-30B-A3B
+  gpus:                1
+  window:              30
+
+  random_seed: 1337
