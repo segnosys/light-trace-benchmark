@@ -246,7 +246,8 @@ class BenchMetrics:
     planned_prompt_lengths: List[int] = field(default_factory=list)  # Track prompt lengths at SEND time (deterministic order)
     planned_ideal_cache_hit_rates: List[float] = field(default_factory=list)  # Track ideal cache hit rates at SEND time (deterministic order)
     actual_prompt_lengths: List[int] = field(default_factory=list)  # Track actual prompt lengths at COMPLETION time
-    actual_generation_lengths: List[int] = field(default_factory=list)  # Track actual generation lengths
+    actual_generation_lengths: List[int] = field(default_factory=list)  # Track actual generation lengths (includes reasoning)
+    actual_reasoning_lengths: List[int] = field(default_factory=list)  # Track hidden reasoning tokens (e.g. <think>...) separately
     actual_cache_hit_rates: List[float] = field(default_factory=list)  # Track per-request cache hit rates
     ideal_cache_hit_rates: List[float] = field(default_factory=list)  # Track ideal cache hit rates (assuming no eviction)
     actual_ttfts: List[float] = field(default_factory=list)  # Track TTFT (time to first token) in seconds
@@ -259,12 +260,13 @@ class BenchMetrics:
     errors: int = 0
     start_time: float = field(default_factory=time.time)
 
-    def add_prefill(self, tokens: int, duration: float, cached_tokens: int = 0, generation_tps: float = 0.0, generation_tps_mtp: float = 0.0, actual_gen_length: int = 0, generation_time: float = 0.0, prefix_size: int = 0):
+    def add_prefill(self, tokens: int, duration: float, cached_tokens: int = 0, generation_tps: float = 0.0, generation_tps_mtp: float = 0.0, actual_gen_length: int = 0, generation_time: float = 0.0, prefix_size: int = 0, reasoning_tokens: int = 0):
         """Add a prefill measurement with optional cache info"""
         now = time.time()
         self.prefill_samples.append((now, tokens, duration, cached_tokens, generation_tps, generation_tps_mtp, generation_time, prefix_size))
         self.actual_prompt_lengths.append(tokens)
         self.actual_generation_lengths.append(actual_gen_length)
+        self.actual_reasoning_lengths.append(reasoning_tokens)
         self.actual_prefix_sizes.append(prefix_size)
         # Calculate per-request cache hit rates
         actual_rate = cached_tokens / tokens if tokens > 0 else 0.0
@@ -877,6 +879,7 @@ async def dispatch_turn(
     start_time = time.time()
     ttft = None
     cached_tokens = 0
+    reasoning_tokens = 0
     actual_prompt_tokens = 0
     completion_tokens = 0
     full_response = ""  # Accumulate response for accurate token counting
@@ -927,6 +930,8 @@ async def dispatch_turn(
                                         details = usage["prompt_tokens_details"]
                                         if isinstance(details, dict):
                                             cached_tokens = details.get("cached_tokens") or 0
+                                    if "reasoning_tokens" in usage:
+                                        reasoning_tokens = usage.get("reasoning_tokens") or 0
                         except (json.JSONDecodeError, Exception):
                             pass
 
@@ -949,8 +954,9 @@ async def dispatch_turn(
             generation_tps = completion_tokens / generation_time if generation_time > 0 and completion_tokens > 0 else 0.0
             generation_tps_mtp = (completion_tokens * acc_len) / (generation_time * mtp_overhead_factor) if generation_time > 0 and completion_tokens > 0 else 0.0
 
-            metrics.add_prefill(tokens_to_record, ttft, cached_tokens, generation_tps, generation_tps_mtp, 
-                              completion_tokens, generation_time, current_prefix_tokens)
+            metrics.add_prefill(tokens_to_record, ttft, cached_tokens, generation_tps, generation_tps_mtp,
+                              completion_tokens, generation_time, current_prefix_tokens,
+                              reasoning_tokens=reasoning_tokens)
 
             # Calculate and record acceptance length
             if chunk_token_counts:
@@ -1181,6 +1187,7 @@ def compute_phase_breakdown(metrics, benchmark_start: float, ramp_duration_secs:
         ("drain",   sustain_end, float("inf"), None),  # duration inferred from observed window
     ]
     gen_lengths = list(metrics.actual_generation_lengths)
+    reason_lengths = list(metrics.actual_reasoning_lengths)
     samples = list(metrics.prefill_samples)
     out = []
     for name, lo, hi, planned in phases:
@@ -1190,10 +1197,11 @@ def compute_phase_breakdown(metrics, benchmark_start: float, ramp_duration_secs:
             offset = t_abs - benchmark_start
             if lo <= offset < hi:
                 gen_len = gen_lengths[idx] if idx < len(gen_lengths) else 0
-                bucket.append((s, gen_len, offset))
+                rea_len = reason_lengths[idx] if idx < len(reason_lengths) else 0
+                bucket.append((s, gen_len, rea_len, offset))
         if bucket:
-            first_off = min(b[2] for b in bucket)
-            last_off  = max(b[2] for b in bucket)
+            first_off = min(b[3] for b in bucket)
+            last_off  = max(b[3] for b in bucket)
             observed = last_off - first_off
         else:
             first_off, last_off, observed = 0.0, 0.0, 0.0
@@ -1203,11 +1211,13 @@ def compute_phase_breakdown(metrics, benchmark_start: float, ramp_duration_secs:
             # Drain window: require at least a couple seconds of observations
             # before reporting a rate, otherwise the number is meaningless.
             duration = observed if observed >= 2.0 else 0.0
-        total_input  = sum(s[1] for s, _, _ in bucket)
-        total_cached = sum(s[3] for s, _, _ in bucket)
-        total_gen    = sum(g for _, g, _ in bucket)
-        ttfts        = [s[2] for s, _, _ in bucket]
+        total_input    = sum(s[1]  for s, _, _, _ in bucket)
+        total_cached   = sum(s[3]  for s, _, _, _ in bucket)
+        total_gen      = sum(g     for _, g, _, _ in bucket)
+        total_reason   = sum(r     for _, _, r, _ in bucket)
+        ttfts          = [s[2]     for s, _, _, _ in bucket]
         uncached = max(0, total_input - total_cached)
+        visible_gen = max(0, total_gen - total_reason)
         def per_min(x):
             return (x * 60.0 / duration) if duration > 0 else 0.0
         out.append({
@@ -1219,35 +1229,129 @@ def compute_phase_breakdown(metrics, benchmark_start: float, ramp_duration_secs:
             "cached_tokens": total_cached,
             "uncached_tokens": uncached,
             "gen_tokens": total_gen,
+            "reasoning_tokens": total_reason,
+            "visible_tokens": visible_gen,
             "input_tpm": per_min(total_input),
             "cached_tpm": per_min(total_cached),
             "uncached_tpm": per_min(uncached),
             "gen_tpm": per_min(total_gen),
+            "reasoning_tpm": per_min(total_reason),
+            "visible_tpm": per_min(visible_gen),
             "cache_hit_rate": (total_cached / total_input) if total_input > 0 else 0.0,
             "ttft_p50_ms": (percentiles(ttfts, [0.5])[0] * 1000) if ttfts else 0.0,
             "ttft_p90_ms": (percentiles(ttfts, [0.9])[0] * 1000) if ttfts else 0.0,
+            "ttft_p99_ms": (percentiles(ttfts, [0.99])[0] * 1000) if ttfts else 0.0,
         })
     return out
 
 
 def print_phase_breakdown(phases: List[dict], num_gpus: int = 1) -> None:
-    """Pretty-print the ramp/sustain/drain TPM table."""
+    """Pretty-print the ramp/sustain/drain TPM table.
+
+    gen TPM splits into `visible` (user-facing completion) and `reason`
+    (server-reported reasoning/<think> tokens) when the server populates
+    `usage.reasoning_tokens`; otherwise reason stays 0.
+    """
     print(f"\n{Colors.BOLD}Phase Throughput Breakdown (input TPM includes cache; uncached = actual prefill work):{Colors.END}")
-    header = f"  {'phase':<8} {'dur(s)':>7} {'reqs':>5} {'qps':>5} {'input TPM':>12} {'cached TPM':>12} {'uncached TPM':>14} {'gen TPM':>11} {'cache%':>7} {'TTFT p50':>9} {'TTFT p90':>9}"
+    header = (f"  {'phase':<8} {'dur(s)':>7} {'reqs':>5} {'qps':>5} "
+              f"{'input TPM':>12} {'cached TPM':>12} {'uncached TPM':>14} "
+              f"{'visible TPM':>12} {'reason TPM':>11} "
+              f"{'cache%':>7} {'TTFT p50':>9} {'TTFT p90':>9}")
     print(header)
     print("  " + "-" * (len(header) - 2))
     for p in phases:
         if p['duration_s'] <= 0 or p['completed'] == 0:
             print(f"  {p['phase']:<8} {'n/a':>7} {p['completed']:>5d} "
-                  f"{'n/a':>5} {'n/a':>12} {'n/a':>12} {'n/a':>14} {'n/a':>11} "
+                  f"{'n/a':>5} {'n/a':>12} {'n/a':>12} {'n/a':>14} "
+                  f"{'n/a':>12} {'n/a':>11} "
                   f"{'n/a':>7} {'n/a':>9} {'n/a':>9}")
             continue
         print(f"  {p['phase']:<8} {p['duration_s']:>7.1f} {p['completed']:>5d} "
               f"{p['qps']:>5.2f} {p['input_tpm']:>12,.0f} {p['cached_tpm']:>12,.0f} "
-              f"{p['uncached_tpm']:>14,.0f} {p['gen_tpm']:>11,.0f} "
+              f"{p['uncached_tpm']:>14,.0f} "
+              f"{p['visible_tpm']:>12,.0f} {p['reasoning_tpm']:>11,.0f} "
               f"{p['cache_hit_rate']*100:>6.1f}% {p['ttft_p50_ms']:>8.1f}ms {p['ttft_p90_ms']:>8.1f}ms")
     if num_gpus > 1:
         print(f"  (per-GPU: divide TPM by {num_gpus})")
+
+
+def write_run_summary(run_dir, metrics, phases: List[dict], context: dict) -> None:
+    """Write a machine-readable summary.json with overall + per-phase stats.
+
+    `context` carries the run-level settings downstream tools want to key on
+    (model, server_url, target QPS range, num_gpus, mode, etc.).
+    """
+    try:
+        prompts = list(metrics.actual_prompt_lengths)
+        gens    = list(metrics.actual_generation_lengths)
+        reas    = list(metrics.actual_reasoning_lengths)
+        ttfts   = list(metrics.actual_ttfts)
+        start   = metrics.start_time
+        end     = time.time()
+        duration = end - start
+        total_prompt  = sum(prompts)
+        total_gen     = sum(gens)
+        total_reason  = sum(reas)
+        total_visible = max(0, total_gen - total_reason)
+        total_cached  = sum(s[3] for s in metrics.prefill_samples)
+        total_prefix  = sum(s[7] for s in metrics.prefill_samples)
+        sent      = int(metrics.requests_sent)
+        completed = int(metrics.requests_completed)
+        errors    = int(metrics.errors)
+        success_rate = (completed / sent) if sent else 0.0
+        summary = {
+            "context": context,
+            "duration_s": duration,
+            "requests_sent": sent,
+            "requests_completed": completed,
+            "errors": errors,
+            "success_rate": success_rate,
+            "actual_average_qps": (sent / duration) if duration > 0 else 0.0,
+            "totals": {
+                "input_tokens":     total_prompt,
+                "cached_tokens":    total_cached,
+                "uncached_tokens":  max(0, total_prompt - total_cached),
+                "prefix_tokens":    total_prefix,
+                "generation_tokens":  total_gen,
+                "reasoning_tokens":   total_reason,
+                "visible_tokens":     total_visible,
+            },
+            "prompt_length":  {
+                "mean":  float(np.mean(prompts))  if prompts else 0.0,
+                "p50":   float(percentiles(prompts,  [0.5])[0])  if prompts else 0.0,
+                "p90":   float(percentiles(prompts,  [0.9])[0])  if prompts else 0.0,
+                "p99":   float(percentiles(prompts,  [0.99])[0]) if prompts else 0.0,
+            },
+            "generation_length": {
+                "mean":  float(np.mean(gens))  if gens else 0.0,
+                "p50":   float(percentiles(gens,  [0.5])[0])  if gens else 0.0,
+                "p90":   float(percentiles(gens,  [0.9])[0])  if gens else 0.0,
+                "p99":   float(percentiles(gens,  [0.99])[0]) if gens else 0.0,
+            },
+            "reasoning_length": {
+                "mean":  float(np.mean(reas))  if reas else 0.0,
+                "p90":   float(percentiles(reas,  [0.9])[0])  if reas else 0.0,
+            },
+            "ttft_ms": {
+                "p50":  float(percentiles(ttfts, [0.5])[0])  * 1000 if ttfts else 0.0,
+                "p90":  float(percentiles(ttfts, [0.9])[0])  * 1000 if ttfts else 0.0,
+                "p99":  float(percentiles(ttfts, [0.99])[0]) * 1000 if ttfts else 0.0,
+            },
+            "cache": {
+                "ideal_hit_rate":  (total_prefix / total_prompt) if total_prompt else 0.0,
+                "actual_hit_rate": (total_cached / total_prompt) if total_prompt else 0.0,
+                "efficiency":      (total_cached / total_prefix) if total_prefix else 0.0,
+                "eviction_rate":   (max(0, total_prefix - total_cached) / total_prefix) if total_prefix else 0.0,
+                "server_reported_cached": total_cached > 0,
+            },
+            "phases": phases,
+        }
+        run_dir = Path(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with open(run_dir / "summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+    except Exception as exc:
+        print(f"{Colors.YELLOW}Could not write summary.json: {exc}{Colors.END}")
 
 
 class RunStorage:
@@ -1281,7 +1385,9 @@ async def save_metrics_loop(
     num_gpus: int,
     mtp_draft_tokens: int,
     running_flag: dict,
-    session_stats: dict = None  # {"created_by_rate": 0, "abandoned_by_rate": 0}
+    session_stats: dict = None,  # {"created_by_rate": 0, "abandoned_by_rate": 0}
+    ramp_duration_secs: float = 0.0,
+    sustain_duration_secs: float = 0.0,
 ):
     """Save metrics to JSONL file every second for live dashboard.
 
@@ -1394,9 +1500,18 @@ async def save_metrics_loop(
         new_inter_arrival_times = metrics.inter_arrival_times[last_inter_arrival_index:current_inter_arrival_len]
         last_inter_arrival_index = current_inter_arrival_len
 
+        elapsed = now - start_time
+        if elapsed < ramp_duration_secs:
+            phase = "ramp"
+        elif elapsed < ramp_duration_secs + sustain_duration_secs:
+            phase = "sustain"
+        else:
+            phase = "drain"
+
         record = {
             "timestamp": now,
-            "elapsed_seconds": now - start_time,
+            "elapsed_seconds": elapsed,
+            "phase": phase,
             "prefill_tps": prefill_tps_window,
             "prefill_tps_window": prefill_tps_window,
             "prefill_tpm_per_gpu": (prefill_tps_window * 60) / num_gpus if num_gpus > 0 else 0,
@@ -1593,7 +1708,8 @@ async def run_replay(
     running_flag = {"running": True}
     if metrics_file:
         metrics_task = asyncio.create_task(
-            save_metrics_loop(metrics, sessions, metrics_file, window_size, num_gpus, mtp_draft_tokens, running_flag)
+            save_metrics_loop(metrics, sessions, metrics_file, window_size, num_gpus, mtp_draft_tokens, running_flag,
+                              ramp_duration_secs=ramp_duration_secs, sustain_duration_secs=sustain_duration_secs)
         )
 
     try:
@@ -1742,6 +1858,20 @@ async def run_replay(
     # Ramp / sustain / drain throughput table
     phases = compute_phase_breakdown(metrics, metrics.start_time, ramp_duration_secs, sustain_duration_secs)
     print_phase_breakdown(phases, num_gpus=num_gpus)
+
+    # Machine-readable summary for sweep aggregation / CI
+    if 'run_dir' in locals() and run_dir is not None:
+        write_run_summary(run_dir, metrics, phases, context={
+            "mode": "traffic-replay",
+            "server_url": server_url,
+            "model": model,
+            "num_gpus": num_gpus,
+            "ramp_duration_secs": ramp_duration_secs,
+            "sustain_duration_secs": sustain_duration_secs,
+            "initial_qps": initial_qps,
+            "max_qps": max_qps,
+            "max_inflight": max_inflight,
+        })
 
     # Calculate actual new session ratio from timeline
     if metrics.request_timeline:
@@ -1961,6 +2091,7 @@ async def run_session_walk(
         start_time = time.time()
         ttft = None
         cached_tokens = 0
+        reasoning_tokens = 0
         actual_prompt_tokens = 0
         full_response = ""
         chunk_token_counts = []
@@ -2008,6 +2139,8 @@ async def run_session_walk(
                                             details = usage["prompt_tokens_details"]
                                             if isinstance(details, dict):
                                                 cached_tokens = details.get("cached_tokens") or 0
+                                        if "reasoning_tokens" in usage:
+                                            reasoning_tokens = usage.get("reasoning_tokens") or 0
                             except (json.JSONDecodeError, Exception):
                                 pass
 
@@ -2024,7 +2157,8 @@ async def run_session_walk(
 
                 tokens_to_record = actual_prompt_tokens if actual_prompt_tokens > 0 else total_prompt_tokens
                 metrics.add_prefill(tokens_to_record, ttft, cached_tokens, generation_tps, generation_tps_mtp,
-                                    completion_tokens, generation_time, current_prefix_tokens)
+                                    completion_tokens, generation_time, current_prefix_tokens,
+                                    reasoning_tokens=reasoning_tokens)
 
                 if chunk_token_counts:
                     avg_acceptance_length = sum(chunk_token_counts) / len(chunk_token_counts)
@@ -2116,7 +2250,8 @@ async def run_session_walk(
     running_flag = {"running": True}
     if metrics_file:
         metrics_task = asyncio.create_task(
-            save_metrics_loop(metrics, sessions, metrics_file, window_size, num_gpus, mtp_draft_tokens, running_flag, session_stats)
+            save_metrics_loop(metrics, sessions, metrics_file, window_size, num_gpus, mtp_draft_tokens, running_flag, session_stats,
+                              ramp_duration_secs=ramp_duration_secs, sustain_duration_secs=sustain_duration_secs)
         )
 
     # Start initial sessions with staggered timing (1 second apart to avoid thundering herd)
@@ -2321,6 +2456,18 @@ async def run_session_walk(
     # Ramp / sustain / drain throughput table
     phases = compute_phase_breakdown(metrics, metrics.start_time, ramp_duration_secs, sustain_duration_secs)
     print_phase_breakdown(phases, num_gpus=num_gpus)
+
+    # Machine-readable summary for sweep aggregation / CI
+    if 'run_dir' in locals() and run_dir is not None:
+        write_run_summary(run_dir, metrics, phases, context={
+            "mode": "realistic",
+            "server_url": server_url,
+            "model": model,
+            "num_gpus": num_gpus,
+            "ramp_duration_secs": ramp_duration_secs,
+            "sustain_duration_secs": sustain_duration_secs,
+            "max_inflight": max_inflight,
+        })
 
     # Inter-arrival time stats (realistic mode specific)
     if metrics.inter_arrival_times:

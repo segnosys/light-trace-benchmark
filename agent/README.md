@@ -16,6 +16,28 @@ TTFT, cache hit rate, and ramp / sustain / drain **TPM** breakdowns.
 
 ---
 
+## Setup
+
+```bash
+# Python ≥ 3.10 and these four wheels are all you need for the driver;
+# `dash` / `plotly` are only required if you want to run the viewer.
+pip install -r requirements.txt
+
+# If your HF model / tokenizer cache lives on a data disk (not $HOME):
+export HF_HUB_CACHE=/scratch/huggingface
+export HF_HOME=/scratch/huggingface
+export TRANSFORMERS_OFFLINE=1      # don't reach out to huggingface.co at runtime
+```
+
+The shipped `run*.sh` scripts already set these HF variables; you only
+need the exports if you invoke `agent_throughput.py` / `runner.py`
+directly and your HF cache isn't in the default `~/.cache/huggingface`.
+
+Docker itself is only required for the sglang launch helpers — the
+driver is a pure Python client.
+
+---
+
 ## Files
 
 ```
@@ -433,3 +455,114 @@ python3 runner.py \
   --model  qwen3-30b-a3b-nvfp4 \
   --results-dir qps_sweep_results_code_agent
 ```
+
+`runner.py` seeds each QPS point with a distinct random seed (derived from
+the run's wall-clock timestamp) so the server's prefix cache doesn't
+illegally carry warm-up work between points.
+
+### Preview mode (no HTTP)
+
+Pass `--mode preview` to `agent_throughput.py` to exercise the full
+scheduling + prompt-building + tokenization pipeline **without actually
+hitting the server**. Handy for:
+
+* sanity-checking a new workload YAML (the planned prompt / generation
+  distributions are printed),
+* measuring pure client-side overhead before pointing at a production
+  server.
+
+### Realistic mode (response-driven arrivals)
+
+`--mode realistic` replaces the open-loop QPS schedule with
+session-coupled arrivals: a session sends its next turn only after the
+previous reply lands, plus a sampled "think time" delay. Useful when you
+want to model a fixed population of concurrent users rather than hitting
+a target arrivals rate. Requires `think_time_*`, `session_lifetime_*`,
+`max_sessions`, and `session_abandon_rate` in the YAML — see the flags in
+`agent_throughput.py --help`.
+
+---
+
+## Output layout
+
+A single run with `--name X --data-dir benchmarks` writes:
+
+```
+benchmarks/X/YYYY-MM-DD-HH-MM-SS/
+  metadata.json      # resolved config for the run
+  metrics.jsonl      # per-second rolling TPM / TPS / cache / in-flight /
+                     # session stats — each record now carries a `phase`
+                     # field (ramp | sustain | drain) so the viewer can
+                     # filter for steady-state without timestamp math
+  summary.json       # machine-readable final summary: overall + phase-by-phase
+                     # (input / cached / uncached / visible_gen / reasoning TPM,
+                     #  TTFT percentiles, cache efficiency, context snapshot)
+```
+
+A sweep via `runner.py --name Y --results-dir Z` adds a layer above:
+
+```
+Z/Y_YYYYMMDD_HHMMSS/
+  test_config.json       # sweep-level config (QPS values, seeds per point, etc.)
+  original_workload.yaml # the workload YAML you passed in
+  temp_config.yaml       # last per-point YAML with overrides applied
+  results.json           # per-point status / elapsed / summary_json pointer
+  results.csv            # flat table (one row per point) — open in pandas/Excel
+  summary.md             # human-readable markdown table of sustain metrics
+  summary.txt            # legacy one-liner per QPS (kept for grep)
+  qps_<q>_output.log     # full console output of each single-QPS run
+```
+
+The viewer reads `benchmarks/*/metrics.jsonl`; `summary.json` (per run)
+and `results.csv` / `summary.md` (per sweep) are what downstream scripts
+(CI, pandas notebooks) should key on instead of parsing console logs.
+
+### SLO-driven auto capacity search
+
+Instead of a manual linear sweep you can let the runner binary-search for
+the highest QPS that still clears a TTFT / success-rate budget:
+
+```bash
+python3 runner.py \
+  --name capacity \
+  --workload-config workloads/code_agent_128k.yaml \
+  --auto-search \
+  --slo-ttft-p90-ms   400 \
+  --slo-success-rate  0.99 \
+  --auto-min-qps 0.1 --auto-max-qps 2.0 \
+  --auto-tolerance 0.1 --auto-max-probes 8 \
+  --sustain-duration 180 --max-inflight 16 \
+  --server http://localhost:8001 --model qwen3-30b-a3b-nvfp4 \
+  --results-dir qps_sweep_results_code_agent
+```
+
+The search first probes the two endpoints of `[auto-min-qps, auto-max-qps]`:
+
+* if the floor already violates the SLO it bails (server can't meet it),
+* if the ceiling already passes it reports "capacity ≥ ceiling",
+* otherwise it bisects until the range narrows below `--auto-tolerance`
+  or `--auto-max-probes` runs have been spent.
+
+Every probe still produces a full per-run `summary.json`, and the sweep
+artifacts (`results.csv`, `summary.md`) get rewritten incrementally so
+you can inspect partial progress while the search is running.
+
+---
+
+## Using a non-sglang backend
+
+The driver speaks plain OpenAI `/v1/chat/completions` with streaming plus
+`stream_options.include_usage: true`, so any server that honors that
+contract works. Two things to double-check per backend:
+
+* **Where it puts `cached_tokens`** — OpenAI-style servers report it at
+  `usage.prompt_tokens_details.cached_tokens`; Anthropic-style servers
+  put it at `usage.cache_read_input_tokens`. The driver reads both.
+  vLLM exposes it only when `--enable-prefix-caching` is on and the
+  request includes `cache_salt`; TGI does not report cached_tokens via
+  the OpenAI route at all (check `/metrics` instead).
+* **Whether it emits a final usage chunk** — if the last streamed chunk
+  has `usage == null`, the driver falls back to the *planned* prompt
+  length and logs
+  `INFO: Server not returning prompt_tokens`. Flip on whatever
+  per-server flag is the equivalent of sglang's `--enable-cache-report`.
