@@ -46,6 +46,136 @@ from transformers import AutoTokenizer
 _ASCII_CHARS = string.ascii_letters + string.digits + " " * 10 + ".,!?-\n" * 2
 _ASCII_BYTES = np.array(list(_ASCII_CHARS.encode('ascii')), dtype=np.uint8)
 
+
+# Optional agent-style corpus replacement.
+# If env LIGHTRACE_AGENT_CORPUS is set, make_filler_seeded() returns text
+# composed of real code files from the corpus instead of random ASCII.
+import os as _os
+_AGENT_CORPUS_PATH = _os.environ.get("LIGHTRACE_AGENT_CORPUS")
+_AGENT_CORPUS = None  # lazy-loaded
+
+
+def _load_agent_corpus():
+    """Load the corpus produced by build_agent_corpus.py. Returns list of dicts
+    with keys 'kind' ('code'|'nl'), 'path', 'tokens'."""
+    global _AGENT_CORPUS
+    if _AGENT_CORPUS is None and _AGENT_CORPUS_PATH:
+        with open(_AGENT_CORPUS_PATH) as _f:
+            _AGENT_CORPUS = json.load(_f)
+        # Pre-compute total token count.
+        _AGENT_CORPUS_TOTAL = sum(len(e["tokens"]) for e in _AGENT_CORPUS)
+        print(f"[lightrace] loaded agent corpus from {_AGENT_CORPUS_PATH}: "
+              f"{len(_AGENT_CORPUS)} entries, {_AGENT_CORPUS_TOTAL:,} tokens",
+              flush=True)
+    return _AGENT_CORPUS
+
+
+def make_agent_filler_seeded(target_tokens: int, tokenizer, seed: int) -> str:
+    """Build a chatml-shaped multi-turn conversation of approx target_tokens
+    using real code chunks from the corpus, deterministic per seed.
+
+    Output structure:
+        <|im_start|>system\n<system blurb>\n<|im_end|>
+        <|im_start|>user\n[File: path1]\n```\n<code1>\n```\n... <Question>\n<|im_end|>
+        <|im_start|>assistant\n<code/explain>\n<|im_end|>
+        <|im_start|>user\n<follow-up + tool output>\n<|im_end|>
+        ...
+
+    Decoded text is returned; the caller re-tokenizes (truncating to target).
+    """
+    if target_tokens <= 0:
+        return ""
+    corpus = _load_agent_corpus()
+    if not corpus:
+        # fallback to make_filler_seeded if no corpus
+        return make_filler_seeded(target_tokens, tokenizer, seed)
+
+    rng = np.random.default_rng(seed)
+    parts = []
+
+    sys_blurb = (
+        "You are a senior software engineer assisting with the sglang codebase. "
+        "Use the tools available (read_file, grep, edit, run_tests) and reason "
+        "step by step. Cite file paths when proposing changes."
+    )
+    parts.append(f"<|im_start|>system\n{sys_blurb}\n<|im_end|>\n")
+
+    questions = [
+        "Walk me through this module step by step.",
+        "Find any latent bugs or edge cases this code does not handle.",
+        "Refactor the entry point to be more readable; add type hints.",
+        "Add unit tests covering the main code paths.",
+        "Explain how this file interacts with the scheduler.",
+        "What is the time complexity of the inner loops?",
+        "Suggest one or two performance optimizations.",
+        "Document the public API of this module.",
+    ]
+
+    # Approximate per-char token ratio. We slice tokens (not chars) directly,
+    # avoiding decode/encode roundtrips for speed.
+    accum_tokens = 0
+    target_str_chars = target_tokens * 5  # generous upper bound
+
+    def _pick_entry():
+        return corpus[int(rng.integers(0, len(corpus)))]
+
+    def _decode(token_ids):
+        return tokenizer.decode(token_ids)
+
+    # First user turn: pile of files + a question
+    parts.append("<|im_start|>user\n")
+    first_user_target = int(target_tokens * 0.55)
+    first_user_used = 0
+    while first_user_used < first_user_target:
+        e = _pick_entry()
+        if e["kind"] != "code":
+            continue
+        n = min(len(e["tokens"]), first_user_target - first_user_used - 50)
+        if n < 80:
+            break
+        chunk = e["tokens"][:n]
+        parts.append(f"\n[File: {e['path']}]\n```\n")
+        parts.append(_decode(chunk))
+        parts.append("\n```\n")
+        first_user_used += n + 30
+    parts.append(f"\nQuestion: {questions[int(rng.integers(0, len(questions)))]}\n")
+    parts.append("<|im_end|>\n")
+
+    # Now alternating assistant/user turns until target is exhausted.
+    accum_tokens = first_user_used
+    while accum_tokens < target_tokens:
+        # Assistant turn (use code as filler — we want token distribution similar
+        # to a real assistant explaining + showing code snippets)
+        a_target = max(60, min(int((target_tokens - accum_tokens) * 0.45), 2500))
+        parts.append("<|im_start|>assistant\n")
+        e = _pick_entry()
+        n = min(len(e["tokens"]), a_target)
+        parts.append(_decode(e["tokens"][:n]))
+        parts.append("\n<|im_end|>\n")
+        accum_tokens += n + 20
+        if accum_tokens >= target_tokens:
+            break
+
+        # User follow-up: either question or simulated tool output
+        u_target = max(40, min(int((target_tokens - accum_tokens) * 0.30), 1200))
+        parts.append("<|im_start|>user\n")
+        if rng.random() < 0.5:
+            e = _pick_entry()
+            tool_chunk = e["tokens"][:max(u_target - 30, 30)]
+            parts.append(f"\n[Tool: read_file({e['path']})]\n```\n")
+            parts.append(_decode(tool_chunk))
+            parts.append("\n```\n")
+        else:
+            q = questions[int(rng.integers(0, len(questions)))]
+            parts.append(f"\nFollow-up: {q}\n")
+            # add a small code snippet too
+            e = _pick_entry()
+            parts.append(_decode(e["tokens"][:max(u_target - 80, 20)]))
+        parts.append("\n<|im_end|>\n")
+        accum_tokens += u_target + 30
+
+    return "".join(parts)
+
 # Minimum generation time threshold for TPS calculations.
 # Samples with shorter decode times are filtered as timing artifacts from network streaming.
 # Set to 50ms to cap realistic TPS at ~500 (assuming 5-12ms per token with acc_len=3)
@@ -464,9 +594,14 @@ def make_filler_seeded(target_tokens: int, tokenizer, seed: int) -> str:
 
     Optimized: Uses numpy vectorized operations which is ~100x faster than
     Python loops. Generates random indices into pre-computed byte array.
+
+    If LIGHTRACE_AGENT_CORPUS env var is set, delegates to make_agent_filler_seeded
+    which produces realistic chatml-shaped agent prompts from a code corpus.
     """
     if target_tokens <= 0:
         return ""
+    if _AGENT_CORPUS_PATH:
+        return make_agent_filler_seeded(target_tokens, tokenizer, seed)
 
     # average 4 chars per token - generate exactly what we need
     num_chars = target_tokens * 4
@@ -866,7 +1001,7 @@ async def dispatch_turn(
         "stream": True,
         "stream_options": {"include_usage": True},
         "max_tokens": generation_length,
-        "temperature": 1.0,
+        "temperature": 0.0,
         "user": selected_session.id,
         "ignore_eos": ignore_eos,
     }
@@ -1642,9 +1777,22 @@ async def run_replay(
     # Create initial sessions using spawn_session for pre-tokenized base text
     if num_initial_sessions > 0:
         print(f"{Colors.CYAN}Creating {num_initial_sessions} initial session(s)...{Colors.END}")
+        # Use the lognormal initial_prefix distribution so the prompt mix at
+        # t=0 already reflects sessions at varied life stages.
+        if initial_prefix_mean > 0 and initial_prefix_median > 0:
+            _mu = math.log(initial_prefix_median)
+            _sigma = math.sqrt(2 * math.log(initial_prefix_mean / initial_prefix_median)) \
+                if initial_prefix_mean > initial_prefix_median else 0.1
+        else:
+            _mu = _sigma = 0.0
         for i in range(num_initial_sessions):
             # Use unique seed for each initial session
             seed = random_seed + i * 1000 if random_seed else i * 1000
+            if _sigma > 0:
+                _ipt = max(0, int(np.random.lognormal(mean=_mu, sigma=_sigma)))
+                _ipt = min(_ipt, max(0, max_prompt_tokens - system_prompt_tokens))
+            else:
+                _ipt = 0
             spawn_session(
                 sessions=sessions,
                 system_prompt=system_prompt,
@@ -1653,7 +1801,7 @@ async def run_replay(
                 tokenizer=tokenizer,
                 max_prompt_tokens=max_prompt_tokens,
                 seed=seed,
-                initial_prefix_tokens=0,  # Start with just system prompt
+                initial_prefix_tokens=_ipt,
                 max_sessions=100
             )
         print(f"{Colors.GREEN}Done. Starting with {len(sessions)} session(s).{Colors.END}")
@@ -2078,7 +2226,7 @@ async def run_session_walk(
             "stream": True,
             "stream_options": {"include_usage": True},
             "max_tokens": generation_length,
-            "temperature": 1.0,
+            "temperature": 0.0,
             "user": session.id,
             "ignore_eos": ignore_eos,
         }

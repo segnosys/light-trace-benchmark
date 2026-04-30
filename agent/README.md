@@ -566,3 +566,89 @@ contract works. Two things to double-check per backend:
   length and logs
   `INFO: Server not returning prompt_tokens`. Flip on whatever
   per-server flag is the equivalent of sglang's `--enable-cache-report`.
+
+---
+
+## Realistic corpus mode (`LIGHTRACE_AGENT_CORPUS`)
+
+The default filler is random ASCII. That's fine for cache-hit / TPM
+plumbing, but the prompts don't *look* like agent traffic — short,
+homogeneous sentences tokenize very differently from real source code or
+multi-turn ChatML, which can mask tokenizer- or template-sensitive
+regressions in the server.
+
+Setting `LIGHTRACE_AGENT_CORPUS=/path/to/corpus.json` flips
+`make_filler_seeded()` into a chatml-shaped builder that assembles the
+prompt from real code chunks plus a small natural-language overlay
+(reviewer notes, README-style explanations). When the env var is unset
+the driver falls back to the random-ASCII filler, so existing scripts
+keep working.
+
+### Build a corpus
+
+`agent/build_agent_corpus.py` tokenizes a code tree once and dumps it
+as a json list of `(kind, path, tokens)` records. Tokenizer is
+configurable, so you can build per-model corpora:
+
+```bash
+python3 agent/build_agent_corpus.py \
+    --tokenizer /path/to/MyModel \
+    --code-root /path/to/sglang-fork \
+    --out /scratch/agent_corpus_mymodel.json
+```
+
+The tool defaults to `/mnt/vast/jiejing/sglang-fork` for the code root
+and skips files outside `[200B, 60KB]`. Adjust `--max-files` if you
+want a larger corpus.
+
+> **Why per-model?** The corpus stores token IDs (not text). Decoding
+> with a different tokenizer will produce garbage. Build one corpus per
+> tokenizer family you intend to benchmark.
+
+### Use a corpus in a run
+
+```bash
+export LIGHTRACE_AGENT_CORPUS=/scratch/agent_corpus_mymodel.json
+
+python3 runner.py \
+    --name code-agent-real \
+    --workload-config workloads/code_agent_50k_cache90.yaml \
+    --start-qps 0.4 --end-qps 2.0 --step 0.4 \
+    --max-inflight 24 \
+    --server http://localhost:8000 --model my-model
+```
+
+The first request prints e.g.
+`[lightrace] loaded agent corpus from /scratch/...: 552 entries, 1,166,108 tokens`
+to confirm the corpus was picked up.
+
+### Workload yamls included
+
+```
+workloads/
+  code_agent_50k_cache90.yaml         50K mean / 200 out / ~90% cache (MiniMax tokenizer)
+  code_agent_50k_cache90_kimi.yaml    same shape, Kimi-K2.5 tokenizer
+  code_agent_50k_cache90_mxfp4.yaml   MiniMax-MXFP4 variant
+  code_agent_50k_cache94_kimi.yaml    50K mean / 500 out / ~94% cache, growing prefix
+  code_agent_64k_cache935_kimi.yaml   63K mean / lognormal output / ~93.5% cache
+```
+
+Each file documents its growth math at the top
+(`p1`, `d`, `max_prompt`, expected ideal hit rate). Use them as
+templates — the only fields you usually need to retune are
+`initial_prefix_mean/median`, `new_tokens_mean/median`,
+`max_prompt_tokens`, `generation_length_mean/median`, and the
+`tokenizer` path.
+
+### Pre-populated initial sessions
+
+The driver creates `initial_sessions` chat sessions before traffic
+ramps in, so the prompt mix at `t=0` looks like real steady-state
+traffic. Initial sessions now sample `initial_prefix_tokens` from the
+same lognormal as new sessions (controlled by `initial_prefix_mean` /
+`initial_prefix_median`) instead of starting at the system prompt
+length. Without this, low-`max_inflight` runs would never see the
+configured prompt distribution within the sustain window — sessions
+hadn't grown into shape yet. Set
+`initial_prefix_mean = initial_prefix_median = 0` if you want the old
+behavior (sessions start at just the system prompt).

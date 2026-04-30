@@ -26,3 +26,7 @@ tmp*
 torchelastic*
 *.csv
 .DS_Store
+
+# Built corpora used by LIGHTRACE_AGENT_CORPUS (data, not source — rebuild with agent/build_agent_corpus.py)
+agent_corpus*.json
+agent/*.orig
