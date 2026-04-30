@@ -1,0 +1,45 @@
+# Workload: ~50K MEAN input, 200 output, ~90% prefix-cache hit, 24 in-flight.
+#
+# Cache-hit math:
+#   Within a session, prompt grows: p_1, p_1+d, p_1+2d, ..., p_1+(N-1)d
+#   Cache hit at turn i = p_{i-1} / p_i, ideal_hit = 1 - p_N / sum(p_1..p_N).
+#   With p_1=10k, d=5k, max_prompt=100k -> N=19 turns, mean=50k, ideal=~90%.
+#
+# Each session: starts at ~10K, grows 5K per turn, retires near 100K.
+# Average request prompt across the session is ~50K.
+
+workload:
+  system_prompt_len:     1000
+  initial_prefix_mean:   9000        # first request prompt ~10K (system + initial)
+  initial_prefix_median: 7500        # lognormal-skewed
+  new_tokens_mean:       5000
+  new_tokens_median:     4500
+  max_prompt_tokens:     100000      # retire near 100K -> mean across session ~50K
+
+  # Session arrival & selection — slow new-session rate so existing sessions keep growing.
+  new_session_rate:      0.03
+  session_decay_lambda:  0.005
+  initial_sessions:      8
+
+  # Response generation
+  generation_length_mean:   200
+  generation_length_median: 200
+
+  # Traffic shape — drive enough QPS to saturate 24 in-flight
+  initial_qps:      0.5
+  max_qps:          5.0
+  ramp_duration:    60
+  sustain_duration: 600
+  max_inflight:     24
+  poisson:          true
+  poisson_shape:    3
+
+  # Speculative-decoding / metric knobs
+  acc_len:             1.0
+  mtp_overhead_factor: 1.0
+  mtp_draft_tokens:    3
+  tokenizer:           /mnt/vast/john/huggingface/MiniMax-M2.5
+  gpus:                2
+  window:              30
+
+  random_seed: 1337

@@ -1,0 +1,39 @@
+# Workload: input avg 63K / p50 64K / p90 104K / p99 120K, output mean 461 / p50 303 / p90 ~1068.
+# Target cache hit ~93.5%.
+#
+# Prompt distribution comes from growing-prefix sessions: p1=5K, d=3K, max=120K (~39 turns).
+# At full mix the prompt is roughly uniform on [5K, 120K] -> p50 ≈ 62K, p90 ≈ 109K, p99 ≈ 119K.
+#
+# Output distribution is lognormal via mean=461 / median=303 -> sigma ≈ 0.92, p90 ≈ 1000-1100.
+
+workload:
+  system_prompt_len:     1000
+  initial_prefix_mean:   55000
+  initial_prefix_median: 50000
+  new_tokens_mean:       2000
+  new_tokens_median:     1700
+  max_prompt_tokens:     120000
+
+  new_session_rate:      0.025
+  session_decay_lambda:  0.004
+  initial_sessions:      8
+
+  generation_length_mean:   461
+  generation_length_median: 303
+
+  initial_qps:      0.5
+  max_qps:          5.0
+  ramp_duration:    60
+  sustain_duration: 360
+  max_inflight:     24
+  poisson:          true
+  poisson_shape:    3
+
+  acc_len:             1.0
+  mtp_overhead_factor: 1.0
+  mtp_draft_tokens:    3
+  tokenizer:           /mnt/vast/john/huggingface/Kimi-K2.5-MXFP4
+  gpus:                4
+  window:              30
+
+  random_seed: 1337
