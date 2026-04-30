@@ -1,0 +1,50 @@
+# Workload profile: interactive code agent — long-context variant.
+#
+# Sized for a 200K-context server. Per-request prompt length targets
+# ~60K tokens on average (~55K prefix + ~2K system + ~3K accumulated
+# turns), with a hard cap at 200K.
+#
+# Traffic pattern:
+#   * Agent opens a session with a large project / multi-file snapshot
+#     plus a tool preamble.
+#   * Each turn the user supplies a moderate delta (diff, tool output,
+#     selection) and the assistant returns an edit or short explanation.
+#   * Session retires when its prompt approaches the 200K cap.
+#   * Arrivals are bursty — Gamma(shape=3) inter-arrivals.
+
+workload:
+  # Session context growth — target ~60K mean per-request prompt
+  system_prompt_len:     2000      # tool / style preamble
+  initial_prefix_mean:   55000     # opening project / file snapshot
+  initial_prefix_median: 48000     # lognormal, right-skewed
+  new_tokens_mean:       3000      # avg delta per turn
+  new_tokens_median:     1200      # median delta
+  max_prompt_tokens:     200000    # retire session past this
+
+  # Session arrival & selection
+  new_session_rate:      0.04
+  session_decay_lambda:  0.005
+  initial_sessions:      6
+
+  # Response generation
+  generation_length_mean:   520
+  generation_length_median: 300
+
+  # Traffic shape
+  initial_qps:      0.05
+  max_qps:          0.3             # long prompts — keep QPS modest
+  ramp_duration:    45
+  sustain_duration: 600
+  max_inflight:     32
+  poisson:          true
+  poisson_shape:    3
+
+  # Speculative-decoding / metric knobs
+  acc_len:             1.0
+  mtp_overhead_factor: 1.0
+  mtp_draft_tokens:    3
+  tokenizer:           Qwen/Qwen3-30B-A3B
+  gpus:                1
+  window:              30
+
+  random_seed: 1337

@@ -1,0 +1,12 @@
+# Runtime artifacts produced by agent_throughput.py / runner.py — do not commit
+benchmarks/
+qps_sweep_results*/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Editor / environment
+.venv/
+.idea/
+.vscode/
