@@ -1044,8 +1044,11 @@ async def dispatch_turn(
                             if "choices" in data and data["choices"]:
                                 delta = data["choices"][0].get("delta", {})
                                 resp_content = delta.get("content", "")
-                                if resp_content and ttft is None:
+                                resp_reason = delta.get("reasoning_content") or delta.get("reasoning")
+                                if (resp_content or resp_reason) and ttft is None:
                                     ttft = time.time() - start_time
+                                if resp_reason:
+                                    full_response += resp_reason
                                 if resp_content:
                                     full_response += resp_content
                                     # Count tokens in this chunk for acceptance length
@@ -2268,8 +2271,11 @@ async def run_session_walk(
                                 if "choices" in data and data["choices"]:
                                     delta = data["choices"][0].get("delta", {})
                                     resp_content = delta.get("content", "")
-                                    if resp_content and ttft is None:
+                                    resp_reason = delta.get("reasoning_content") or delta.get("reasoning")
+                                    if (resp_content or resp_reason) and ttft is None:
                                         ttft = time.time() - start_time
+                                    if resp_reason:
+                                        full_response += resp_reason
                                     if resp_content:
                                         full_response += resp_content
                                         chunk_tokens = len(tokenizer.encode(resp_content, add_special_tokens=False)) - 1
