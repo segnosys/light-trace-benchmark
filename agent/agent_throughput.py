@@ -381,6 +381,7 @@ class BenchMetrics:
     actual_cache_hit_rates: List[float] = field(default_factory=list)  # Track per-request cache hit rates
     ideal_cache_hit_rates: List[float] = field(default_factory=list)  # Track ideal cache hit rates (assuming no eviction)
     actual_ttfts: List[float] = field(default_factory=list)  # Track TTFT (time to first token) in seconds
+    actual_tpots: List[float] = field(default_factory=list)  # Track TPOT (time per output token, excl. first) in seconds
     actual_acceptance_lengths: List[float] = field(default_factory=list)  # Track per-request average acceptance length
     actual_prefix_sizes: List[int] = field(default_factory=list)  # Track prefix sizes used per request
     request_timeline: List[Tuple[float, bool, str, bool]] = field(default_factory=list)  # (timestamp, is_new_session, session_id, is_forced)
@@ -404,6 +405,11 @@ class BenchMetrics:
         self.actual_cache_hit_rates.append(actual_rate)
         self.ideal_cache_hit_rates.append(ideal_rate)
         self.actual_ttfts.append(duration)
+        # TPOT (time per output token, excluding the first one which is TTFT).
+        # Only record when we have >=2 output tokens AND a non-trivial generation
+        # window — otherwise the value is dominated by jitter / scheduling noise.
+        if actual_gen_length > 1 and generation_time >= MIN_GENERATION_TIME:
+            self.actual_tpots.append(generation_time / (actual_gen_length - 1))
 
     def add_acceptance_length(self, avg_acc_len: float):
         """Record average acceptance length for a completed request"""
@@ -1354,6 +1360,9 @@ def compute_phase_breakdown(metrics, benchmark_start: float, ramp_duration_secs:
         total_gen      = sum(g     for _, g, _, _ in bucket)
         total_reason   = sum(r     for _, _, r, _ in bucket)
         ttfts          = [s[2]     for s, _, _, _ in bucket]
+        # TPOT = generation_time / (gen_len - 1); skip noisy samples (gen<=1 or gen_time too short)
+        tpots          = [s[6] / (g - 1) for s, g, _, _ in bucket
+                          if g > 1 and s[6] >= MIN_GENERATION_TIME]
         uncached = max(0, total_input - total_cached)
         visible_gen = max(0, total_gen - total_reason)
         def per_min(x):
@@ -1379,6 +1388,9 @@ def compute_phase_breakdown(metrics, benchmark_start: float, ramp_duration_secs:
             "ttft_p50_ms": (percentiles(ttfts, [0.5])[0] * 1000) if ttfts else 0.0,
             "ttft_p90_ms": (percentiles(ttfts, [0.9])[0] * 1000) if ttfts else 0.0,
             "ttft_p99_ms": (percentiles(ttfts, [0.99])[0] * 1000) if ttfts else 0.0,
+            "tpot_p50_ms": (percentiles(tpots, [0.5])[0] * 1000) if tpots else 0.0,
+            "tpot_p90_ms": (percentiles(tpots, [0.9])[0] * 1000) if tpots else 0.0,
+            "tpot_p99_ms": (percentiles(tpots, [0.99])[0] * 1000) if tpots else 0.0,
         })
     return out
 
@@ -1394,7 +1406,8 @@ def print_phase_breakdown(phases: List[dict], num_gpus: int = 1) -> None:
     header = (f"  {'phase':<8} {'dur(s)':>7} {'reqs':>5} {'qps':>5} "
               f"{'input TPM':>12} {'cached TPM':>12} {'uncached TPM':>14} "
               f"{'visible TPM':>12} {'reason TPM':>11} "
-              f"{'cache%':>7} {'TTFT p50':>9} {'TTFT p90':>9}")
+              f"{'cache%':>7} {'TTFT p50':>9} {'TTFT p90':>9} "
+              f"{'TPOT p50':>9} {'TPOT p90':>9}")
     print(header)
     print("  " + "-" * (len(header) - 2))
     for p in phases:
@@ -1402,13 +1415,15 @@ def print_phase_breakdown(phases: List[dict], num_gpus: int = 1) -> None:
             print(f"  {p['phase']:<8} {'n/a':>7} {p['completed']:>5d} "
                   f"{'n/a':>5} {'n/a':>12} {'n/a':>12} {'n/a':>14} "
                   f"{'n/a':>12} {'n/a':>11} "
-                  f"{'n/a':>7} {'n/a':>9} {'n/a':>9}")
+                  f"{'n/a':>7} {'n/a':>9} {'n/a':>9} "
+                  f"{'n/a':>9} {'n/a':>9}")
             continue
         print(f"  {p['phase']:<8} {p['duration_s']:>7.1f} {p['completed']:>5d} "
               f"{p['qps']:>5.2f} {p['input_tpm']:>12,.0f} {p['cached_tpm']:>12,.0f} "
               f"{p['uncached_tpm']:>14,.0f} "
               f"{p['visible_tpm']:>12,.0f} {p['reasoning_tpm']:>11,.0f} "
-              f"{p['cache_hit_rate']*100:>6.1f}% {p['ttft_p50_ms']:>8.1f}ms {p['ttft_p90_ms']:>8.1f}ms")
+              f"{p['cache_hit_rate']*100:>6.1f}% {p['ttft_p50_ms']:>8.1f}ms {p['ttft_p90_ms']:>8.1f}ms "
+              f"{p['tpot_p50_ms']:>8.1f}ms {p['tpot_p90_ms']:>8.1f}ms")
     if num_gpus > 1:
         print(f"  (per-GPU: divide TPM by {num_gpus})")
 
@@ -1424,6 +1439,7 @@ def write_run_summary(run_dir, metrics, phases: List[dict], context: dict) -> No
         gens    = list(metrics.actual_generation_lengths)
         reas    = list(metrics.actual_reasoning_lengths)
         ttfts   = list(metrics.actual_ttfts)
+        tpots   = list(metrics.actual_tpots)
         start   = metrics.start_time
         end     = time.time()
         duration = end - start
@@ -1471,9 +1487,16 @@ def write_run_summary(run_dir, metrics, phases: List[dict], context: dict) -> No
                 "p90":   float(percentiles(reas,  [0.9])[0])  if reas else 0.0,
             },
             "ttft_ms": {
+                "mean": float(np.mean(ttfts)) * 1000 if ttfts else 0.0,
                 "p50":  float(percentiles(ttfts, [0.5])[0])  * 1000 if ttfts else 0.0,
                 "p90":  float(percentiles(ttfts, [0.9])[0])  * 1000 if ttfts else 0.0,
                 "p99":  float(percentiles(ttfts, [0.99])[0]) * 1000 if ttfts else 0.0,
+            },
+            "tpot_ms": {
+                "mean": float(np.mean(tpots)) * 1000 if tpots else 0.0,
+                "p50":  float(percentiles(tpots, [0.5])[0])  * 1000 if tpots else 0.0,
+                "p90":  float(percentiles(tpots, [0.9])[0])  * 1000 if tpots else 0.0,
+                "p99":  float(percentiles(tpots, [0.99])[0]) * 1000 if tpots else 0.0,
             },
             "cache": {
                 "ideal_hit_rate":  (total_prefix / total_prompt) if total_prompt else 0.0,
@@ -1945,6 +1968,18 @@ async def run_replay(
         print(f"  p50: {p50_ttft*1000:.1f}ms")
         print(f"  p90: {p90_ttft*1000:.1f}ms")
         print(f"  p99: {p99_ttft*1000:.1f}ms")
+
+        # TPOT (Time Per Output Token) — excludes the first token, which is captured by TTFT.
+        # We work off `actual_tpots` (already filtered to gen_len>1 and gen_time>=MIN_GENERATION_TIME).
+        if metrics.actual_tpots:
+            tpot_p50, tpot_p90, tpot_p99 = percentiles(metrics.actual_tpots, [0.5, 0.9, 0.99])
+            tpot_mean = float(np.mean(metrics.actual_tpots))
+            print(f"\n{Colors.BOLD}TPOT (Time Per Output Token, excl. first):{Colors.END}")
+            print(f"  Samples: {len(metrics.actual_tpots)} (filtered: gen_len>1 & gen_time>={MIN_GENERATION_TIME*1000:.0f}ms)")
+            print(f"  Mean: {tpot_mean*1000:.1f}ms ({(1.0/tpot_mean):.1f} tok/s/req)" if tpot_mean > 0 else "  Mean: n/a")
+            print(f"  p50: {tpot_p50*1000:.1f}ms")
+            print(f"  p90: {tpot_p90*1000:.1f}ms")
+            print(f"  p99: {tpot_p99*1000:.1f}ms")
 
         # Calculate average throughput over entire benchmark
         total_prefill_tokens = sum(tokens for _, tokens, _, _, _, _, _, _ in metrics.prefill_samples)
@@ -2547,6 +2582,17 @@ async def run_session_walk(
         print(f"  p50: {p50_ttft*1000:.1f}ms")
         print(f"  p90: {p90_ttft*1000:.1f}ms")
         print(f"  p99: {p99_ttft*1000:.1f}ms")
+
+        # TPOT (Time Per Output Token) — derived from per-request generation_time/(gen_len-1).
+        if metrics.actual_tpots:
+            tpot_p50, tpot_p90, tpot_p99 = percentiles(metrics.actual_tpots, [0.5, 0.9, 0.99])
+            tpot_mean = float(np.mean(metrics.actual_tpots))
+            print(f"\n{Colors.BOLD}TPOT (Time Per Output Token, excl. first):{Colors.END}")
+            print(f"  Samples: {len(metrics.actual_tpots)} (filtered: gen_len>1 & gen_time>={MIN_GENERATION_TIME*1000:.0f}ms)")
+            print(f"  Mean: {tpot_mean*1000:.1f}ms ({(1.0/tpot_mean):.1f} tok/s/req)" if tpot_mean > 0 else "  Mean: n/a")
+            print(f"  p50: {tpot_p50*1000:.1f}ms")
+            print(f"  p90: {tpot_p90*1000:.1f}ms")
+            print(f"  p99: {tpot_p99*1000:.1f}ms")
 
         # Calculate average throughput over entire benchmark
         total_prefill_tokens = sum(tokens for _, tokens, _, _, _, _, _, _ in metrics.prefill_samples)
