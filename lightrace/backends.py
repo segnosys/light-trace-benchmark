@@ -134,6 +134,9 @@ class BaseBackend(abc.ABC):
                     total_logprob_tokens = None
                     t_first_token = None
                     accept_ratio = None
+                    # Prompt-cache accounting from backend usage objects.
+                    cached_input_tokens = None
+                    cache_creation_input_tokens = None
                     raw_chunks = []
 
                     async for chunk_bytes in response.content:
@@ -179,6 +182,13 @@ class BaseBackend(abc.ABC):
                         # capture acceptance rate from chunk metadata if available
                         if fragment.accept_ratio is not None:
                             accept_ratio = fragment.accept_ratio
+
+                        # capture prompt-cache info — usage chunks typically appear
+                        # at end of stream, so we take the last non-None value.
+                        if fragment.cached_input_tokens is not None:
+                            cached_input_tokens = fragment.cached_input_tokens
+                        if fragment.cache_creation_input_tokens is not None:
+                            cache_creation_input_tokens = fragment.cache_creation_input_tokens
 
                         if fragment.text is None:
                             continue
@@ -272,6 +282,12 @@ class BaseBackend(abc.ABC):
                     # set acceptance rate if available
                     if accept_ratio is not None:
                         metrics.accept_ratio = accept_ratio
+
+                    # set cache stats if backend reported them
+                    if cached_input_tokens is not None:
+                        metrics.cached_input_tokens = cached_input_tokens
+                    if cache_creation_input_tokens is not None:
+                        metrics.cache_creation_input_tokens = cache_creation_input_tokens
 
                     # post-validation
                     self.after_request(request, metrics)
@@ -403,11 +419,20 @@ class OpenAIBackend(BaseBackend):
         if isinstance(logprobs, float):
             logprobs = None
 
+        # OpenAI-style prompt-cache stats live under `usage.prompt_tokens_details`.
+        # sglang / vllm OpenAI-compat servers also surface them here when their
+        # cache-report flag is on (sglang: --enable-cache-report).
+        cached = None
+        if usage:
+            details = usage.get("prompt_tokens_details") or {}
+            cached = details.get("cached_tokens")
+
         return FragmentInfo(
             text=text,
             logprob_tokens=len(logprobs["tokens"]) if logprobs else None,
             usage_tokens=usage["completion_tokens"] if usage else None,
             prompt_usage_tokens=usage.get("prompt_tokens", None) if usage else None,
+            cached_input_tokens=cached,
         )
 
 
@@ -599,6 +624,232 @@ class TogetherBackend(VllmBackend):
             data["lora_name"] = request.lora_name
 
         return data
+
+
+class AnthropicBackend(BaseBackend):
+    """
+    Anthropic Messages API (https://docs.anthropic.com/en/api/messages).
+
+    Differences from OpenAI backend:
+      - endpoint: POST /v1/messages
+      - body uses `system` as a top-level field (string OR list of content blocks)
+        rather than a system-role message inside `messages`
+      - SSE event names differ; usage info arrives in `message_start` (input,
+        cache_*) and `message_delta` (output_tokens)
+      - prompt caching is opt-in via `cache_control: {type: "ephemeral"}` on a
+        content block. When `prompt_caching=True` on the request, this backend
+        wraps the system text (or first user content) with that marker so the
+        prefix becomes cacheable across requests.
+
+    Required header set: `x-api-key`, `anthropic-version`. The version pin
+    `2023-06-01` is the long-standing GA version that supports cache_control.
+    """
+
+    ANTHROPIC_API_VERSION = "2023-06-01"
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model_name: str,
+        tokenizer_name: Optional[str] = None,
+        force_recounting_completions: bool = False,
+        enable_prompt_caching: bool = True,
+    ):
+        if not api_key:
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        super().__init__(
+            base_url or "https://api.anthropic.com",
+            api_key,
+            model_name,
+            tokenizer_name,
+            force_recounting_completions,
+        )
+        # When True, mark long content blocks with cache_control so the
+        # Messages API populates cache_read_input_tokens on repeat hits.
+        self.enable_prompt_caching = enable_prompt_caching
+
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.tokenizer_name, trust_remote_code=True
+            )
+        except Exception as e:
+            self.tokenizer = None
+            logging.warning(f"AnthropicBackend tokenizer load skipped: {e}")
+
+    def build_endpoint_url(self, request: InferencePayload) -> str:
+        return os.path.join(self.base_url.rstrip("/"), "v1/messages")
+
+    def build_headers(self) -> Dict:
+        return {
+            "x-api-key": self.api_key,
+            "anthropic-version": self.ANTHROPIC_API_VERSION,
+            "Content-Type": "application/json",
+        }
+
+    def count_prompt_tokens(self, request: InferencePayload) -> int:
+        if not self.tokenizer:
+            return -1
+        if request.messages:
+            return len(self.tokenizer.apply_chat_template(
+                request.messages, tokenize=True, add_generation_prompt=True
+            ))
+        if request.prompt:
+            return len(self.tokenizer.encode(request.prompt))
+        return -1
+
+    def count_text_tokens(self, text: str) -> int:
+        if not self.tokenizer:
+            return -1
+        return len(self.tokenizer.encode(text, add_special_tokens=False))
+
+    def _maybe_wrap_cache_control(self, blocks):
+        """
+        Attach `cache_control: {type: "ephemeral"}` to the LAST text block in
+        the list, which Anthropic uses as the cache boundary (the cumulative
+        prefix up to and including this block becomes the cacheable chunk).
+        No-op when prompt caching is disabled.
+        """
+        if not self.enable_prompt_caching or not blocks:
+            return blocks
+        # Find rightmost text block to mark; leave others untouched.
+        for block in reversed(blocks):
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["cache_control"] = {"type": "ephemeral"}
+                break
+        return blocks
+
+    def build_request_body(self, request: InferencePayload) -> Dict:
+        if not request.messages and not request.prompt:
+            raise ValueError("AnthropicBackend requires messages or prompt")
+
+        system_blocks = []
+        message_list = []
+
+        if request.messages:
+            msgs = (
+                json.loads(request.messages)
+                if isinstance(request.messages, str)
+                else list(request.messages)
+            )
+            # Anthropic puts system messages in a separate `system` field, not
+            # inside `messages`. Hoist any role=system entries out.
+            for m in msgs:
+                if m.get("role") == "system":
+                    text = m.get("content")
+                    if isinstance(text, str):
+                        system_blocks.append({"type": "text", "text": text})
+                    elif isinstance(text, list):
+                        system_blocks.extend(text)
+                else:
+                    # Normalize content -> list of blocks so we can mark caches.
+                    content = m.get("content")
+                    if isinstance(content, str):
+                        m = {**m, "content": [{"type": "text", "text": content}]}
+                    message_list.append(m)
+        else:
+            # `prompt` form -> single user message
+            message_list.append({
+                "role": "user",
+                "content": [{"type": "text", "text": request.prompt}],
+            })
+
+        # Cache-control on the longest cacheable chunk:
+        #   - prefer system blocks if present (most stable across requests)
+        #   - otherwise mark the user message
+        if system_blocks:
+            system_blocks = self._maybe_wrap_cache_control(system_blocks)
+        elif message_list:
+            last = message_list[-1]
+            if isinstance(last.get("content"), list):
+                last["content"] = self._maybe_wrap_cache_control(last["content"])
+
+        body = {
+            "model": self.model_name,
+            "max_tokens": request.max_tokens,
+            "stream": request.stream,
+            "messages": message_list,
+            "temperature": request.temperature if request.temperature is not None else 0.0,
+        }
+        if request.top_p is not None:
+            body["top_p"] = request.top_p
+        if system_blocks:
+            body["system"] = system_blocks
+        # Anthropic doesn't accept skip_eos / ignore_eos — model decides EOS.
+        return body
+
+    def decode_response_chunk(self, data: Any, request: InferencePayload) -> Optional[FragmentInfo]:
+        """
+        Anthropic SSE stream event types we care about:
+          message_start         -> data.message.usage has input + cache_* tokens
+          content_block_delta   -> data.delta.text is the next token chunk
+          message_delta         -> data.usage.output_tokens updates running count
+          message_stop          -> end of stream
+        Non-streaming responses just return the whole message at once.
+        """
+        if isinstance(data, dict) and "error" in data:
+            logging.warning(f"Anthropic error: {data['error']}")
+            return None
+
+        ev_type = data.get("type")
+
+        # Streaming forms.
+        if ev_type == "message_start":
+            usage = (data.get("message") or {}).get("usage", {}) or {}
+            return FragmentInfo(
+                text="",  # no text yet
+                logprob_tokens=None,
+                usage_tokens=usage.get("output_tokens"),
+                prompt_usage_tokens=usage.get("input_tokens"),
+                cached_input_tokens=usage.get("cache_read_input_tokens"),
+                cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+            )
+
+        if ev_type == "content_block_delta":
+            delta = data.get("delta") or {}
+            if delta.get("type") in ("text_delta", "input_json_delta"):
+                return FragmentInfo(
+                    text=delta.get("text") or delta.get("partial_json") or "",
+                    logprob_tokens=None,
+                    usage_tokens=None,
+                    prompt_usage_tokens=None,
+                )
+            # Non-text deltas (tool use, etc.) — skip without failing.
+            return FragmentInfo(text="", logprob_tokens=None,
+                                usage_tokens=None, prompt_usage_tokens=None)
+
+        if ev_type == "message_delta":
+            usage = data.get("usage", {}) or {}
+            return FragmentInfo(
+                text="",
+                logprob_tokens=None,
+                usage_tokens=usage.get("output_tokens"),
+                prompt_usage_tokens=None,
+            )
+
+        if ev_type in ("content_block_start", "content_block_stop", "ping", "message_stop"):
+            return FragmentInfo(text="", logprob_tokens=None,
+                                usage_tokens=None, prompt_usage_tokens=None)
+
+        # Non-streaming response: top-level usage + content blocks.
+        if "content" in data:
+            text = ""
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    text += block.get("text") or ""
+            usage = data.get("usage", {}) or {}
+            return FragmentInfo(
+                text=text,
+                logprob_tokens=None,
+                usage_tokens=usage.get("output_tokens"),
+                prompt_usage_tokens=usage.get("input_tokens"),
+                cached_input_tokens=usage.get("cache_read_input_tokens"),
+                cache_creation_input_tokens=usage.get("cache_creation_input_tokens"),
+            )
+
+        # Unknown event — emit empty to keep stream loop going.
+        return FragmentInfo(text="", logprob_tokens=None,
+                            usage_tokens=None, prompt_usage_tokens=None)
 
 
 class TRTLLMBackend(SGLangBackend):

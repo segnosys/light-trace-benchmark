@@ -1,0 +1,30 @@
+# Workload: sglang radix-cache hit-rate measurement
+#
+# Sends requests with a shared prefix and reports the per-request
+# `cached_tokens` field from the server's OpenAI-compatible /usage response.
+#
+# REQUIRES the sglang server to be launched with:
+#   --enable-cache-report                (turns on prompt_tokens_details.cached_tokens)
+#   --enable-prefix-cache                (the actual prefix cache; off by default)
+#
+# Defaults below assume the server can serve 16 in-flight 4K-token prompts
+# at the model's max context.
+
+provider: sglang
+
+traffic_pattern: burst
+concurrency: 16
+max_num_burst: 4
+burst_interval: 0.0325
+
+dataset_type: synthetic
+synthetic_input_length: 4000
+synthetic_cached_input_length: 3200    # 80% of prompt is the shared prefix
+synthetic_output_length: 100
+num_examples: 64
+same_prompts_in_burst: 'true'
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 100

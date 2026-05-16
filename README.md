@@ -19,7 +19,26 @@ the section that matches.
 
 ## Supported Backends
 
-`openai` | `vllm` | `sglang` | `trtllm`
+`openai` | `vllm` | `sglang` | `trtllm` | `anthropic` | `tgi` | `fireworks` | `nvidia_nim` | `together` | `embeddings`
+
+### Prompt-cache reporting
+
+When the backend reports prompt-cache stats, lightrace surfaces them per request and as an aggregate:
+
+| backend | cache fields populated | how to enable |
+|---|---|---|
+| `anthropic` | `cached_input_tokens` (read) + `cache_creation_input_tokens` (write) | always on — backend marks the system prompt (or last user content block) with `cache_control: {"type":"ephemeral"}` so identical-prefix requests register cache hits |
+| `openai` / `sglang` / `vllm` | `cached_input_tokens` from `usage.prompt_tokens_details.cached_tokens` | server must report — for sglang launch with `--enable-cache-report --enable-prefix-cache`; OpenAI does it automatically |
+| `trtllm` / `tgi` / `fireworks` / `nvidia_nim` / `together` | (none today — these backends don't surface cache stats) | n/a |
+
+Report rendering adds two extra rows when any backend reports caching:
+
+```
+Prompt cache hit rate:     78.4% +/- 12.1%
+Total cached input tokens: 318472
+```
+
+The pre-built configs `anthropic_cache_demo.yaml` and `sglang_cache_report.yaml` exercise these paths.
 
 ## Installation
 
@@ -58,6 +77,12 @@ Bundled batch profiles (typical scenarios — pick one and add `--base_url`/`--m
 | `reasoning_long_decode` | 2K in / 8K out / concurrent=8 | TPOT stability over long generation + KV pressure |
 | `long_prefill_ttft` | 65K in / 100 out / concurrent=4 | TTFT and chunked-prefill sizing |
 | `pure_cold_random` | 64K in / 800 out / concurrent=24 | mirrors the cg+profile kernel-decomposition workload |
+| `hf_math500_reasoning` / `hf_gsm8k` / `hf_humaneval` | public eval-set prompts | real prompt distribution, not synthetic filler |
+| `prefix_cache_80pct` | gsp 80% cached / concurrent=16 | OS prefix-cache effectiveness on shared-prefix traffic |
+| `sharegpt_chat` | sharegpt 512/256 / concurrent=24 | chat shape without HF dataset auth |
+| `jsonl_template` | replay-from-jsonl skeleton | swap in your own prompts |
+| `anthropic_cache_demo` | Claude + `cache_control` markers | Anthropic Messages API + prompt caching |
+| `sglang_cache_report` | shared-prefix shape, reports cache hits | sglang radix-cache hit-rate measurement |
 
 Bundled agent profiles (multi-turn shapes):
 

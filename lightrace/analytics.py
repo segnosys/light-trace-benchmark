@@ -233,7 +233,37 @@ def summarize_benchmark(
             )
         ),
         hf_dataset_name=hf_dataset_name,
+        cache_hit_rate=_extract_cache_hit_rate(success_results, histogram_metrics),
+        total_cached_input_tokens=_sum_cached_input_tokens(success_results),
     )
+
+
+def _extract_cache_hit_rate(
+    results: List[ResultEntry], dump_raw: bool
+) -> Optional[StatsSummary]:
+    """Per-request cache hit ratio (cached / total input). None if no backend reported."""
+    ratios = []
+    for r in results:
+        if not r.metrics:
+            continue
+        cached = r.metrics.cached_input_tokens
+        total = r.metrics.input_token_count
+        if cached is None or not total or total <= 0:
+            continue
+        ratios.append(cached / total)
+    if not ratios:
+        return None
+    return compute_percentiles(ratios, dump_raw=dump_raw)
+
+
+def _sum_cached_input_tokens(results: List[ResultEntry]) -> Optional[int]:
+    total = 0
+    saw_any = False
+    for r in results:
+        if r.metrics and r.metrics.cached_input_tokens is not None:
+            total += r.metrics.cached_input_tokens
+            saw_any = True
+    return total if saw_any else None
 
 
 def render_report(report: BenchmarkReport) -> None:
@@ -287,6 +317,22 @@ def render_report(report: BenchmarkReport) -> None:
                     else [
                         "Acceptance rate:",
                         f"{report.accept_ratio.mean:.2f} +/- {report.accept_ratio.stdev:.2f}",
+                    ]
+                ),
+                (
+                    ["", ""]
+                    if report.cache_hit_rate is None
+                    else [
+                        "Prompt cache hit rate:",
+                        f"{100 * report.cache_hit_rate.mean:.1f}% +/- {100 * report.cache_hit_rate.stdev:.1f}%",
+                    ]
+                ),
+                (
+                    ["", ""]
+                    if report.total_cached_input_tokens is None
+                    else [
+                        "Total cached input tokens:",
+                        f"{report.total_cached_input_tokens}",
                     ]
                 ),
                 ["Job-level tokens/s (decode):", f"{report.overview.job_level_tps:.2f}"],

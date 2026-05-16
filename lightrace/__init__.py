@@ -11,6 +11,7 @@ REGISTERED_BACKENDS = {
     "nvidia_nim": backends.NvidiaNIMBackend,
     "sglang": backends.SGLangBackend,
     "trtllm": backends.TRTLLMBackend,
+    "anthropic": backends.AnthropicBackend,
     "embeddings": backends.OpenAIVectorBackend,
 }
 

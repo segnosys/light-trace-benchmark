@@ -32,6 +32,13 @@ class LatencyProfile:
     char_throughput: Optional[float] = None
     ms_per_char: Optional[float] = None
     accept_ratio: Optional[float] = None
+    # Prompt-cache reporting from the backend's usage block.
+    # - OpenAI / sglang / vllm: usage.prompt_tokens_details.cached_tokens
+    # - Anthropic: usage.cache_read_input_tokens (reads) and
+    #              usage.cache_creation_input_tokens (writes — first request
+    #              that creates the cache entry).
+    cached_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -112,6 +119,9 @@ class FragmentInfo:
     usage_tokens: Optional[int]
     prompt_usage_tokens: Optional[int]
     accept_ratio: Optional[float] = None
+    # Per-chunk cache fields — backends populate these from usage when available.
+    cached_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
 
 
 @dataclass
@@ -177,3 +187,6 @@ class BenchmarkReport:
     per_device: Optional[DeviceThroughput] = None
     accept_ratio: Optional[StatsSummary] = None
     hf_dataset_name: Optional[str] = None
+    # Aggregated cache stats across the run; None if no backend reported cache info.
+    cache_hit_rate: Optional[StatsSummary] = None
+    total_cached_input_tokens: Optional[int] = None
