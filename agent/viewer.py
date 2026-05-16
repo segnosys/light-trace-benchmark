@@ -14,6 +14,30 @@ from dash import Dash, html, dcc, callback, Input, Output
 import plotly.graph_objects as go
 
 
+# Module-level so closures don't capture loop-local rebindings (B023). 10 colors
+# x 4 shapes lets us label up to 40 distinct sessions before symbols repeat.
+SESSION_PALETTE_COLORS = [
+    "#2ecc71",  # Green
+    "#3498db",  # Blue
+    "#9b59b6",  # Purple
+    "#f39c12",  # Orange
+    "#1abc9c",  # Teal
+    "#e91e63",  # Pink
+    "#00bcd4",  # Cyan
+    "#8bc34a",  # Light green
+    "#ff9800",  # Amber
+    "#673ab7",  # Deep purple
+]
+SESSION_PALETTE_SHAPES = ["circle", "square", "diamond", "triangle-up"]
+
+
+def session_style(idx: int):
+    """Stable color + shape for a given session index, paged through the palette."""
+    color = SESSION_PALETTE_COLORS[idx % len(SESSION_PALETTE_COLORS)]
+    shape = SESSION_PALETTE_SHAPES[(idx // len(SESSION_PALETTE_COLORS)) % len(SESSION_PALETTE_SHAPES)]
+    return color, shape
+
+
 @dataclass
 class MetricPoint:
     """Single data point from metrics.jsonl"""
@@ -752,27 +776,10 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                         session_order.append(session_id)
                     session_requests[session_id].append(time_val)
 
-                # Use distinct colors + shapes for maximum differentiation
-                # 10 distinct colors (avoiding red which is for new sessions)
-                distinct_colors = [
-                    '#2ecc71',  # Green
-                    '#3498db',  # Blue
-                    '#9b59b6',  # Purple
-                    '#f39c12',  # Orange
-                    '#1abc9c',  # Teal
-                    '#e91e63',  # Pink
-                    '#00bcd4',  # Cyan
-                    '#8bc34a',  # Light green
-                    '#ff9800',  # Amber
-                    '#673ab7',  # Deep purple
-                ]
-                # 4 distinct shapes
-                distinct_shapes = ['circle', 'square', 'diamond', 'triangle-up']
-
-                def get_session_style(idx):
-                    color = distinct_colors[idx % len(distinct_colors)]
-                    shape = distinct_shapes[(idx // len(distinct_colors)) % len(distinct_shapes)]
-                    return color, shape
+                # Use module-level palette + helper so we don't capture
+                # loop-local rebindings (was a B023 lint hit) and so the
+                # palette lists aren't rebuilt for every trace iteration.
+                get_session_style = session_style
 
                 # Build session style map for legend and store globally
                 for idx, session_id in enumerate(session_order):

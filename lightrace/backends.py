@@ -305,7 +305,9 @@ class BaseBackend(abc.ABC):
                 try:
                     if "response" in locals():
                         trace_id = extract_trace_id_from_headers(response.headers)
-                except Exception:
+                except (AttributeError, KeyError, TypeError, NameError):
+                    # Best-effort trace-id lookup for logging context only;
+                    # never let it mask the original exception we're handling.
                     pass
 
                 logging.warning(
@@ -1171,7 +1173,9 @@ class OpenAIVectorBackend(BaseBackend):
                 try:
                     if "response" in locals():
                         trace_id = extract_trace_id_from_headers(response.headers)
-                except Exception:
+                except (AttributeError, KeyError, TypeError, NameError):
+                    # Best-effort trace-id lookup for logging context only;
+                    # never let it mask the original exception we're handling.
                     pass
 
                 logging.warning(

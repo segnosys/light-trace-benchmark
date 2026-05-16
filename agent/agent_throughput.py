@@ -278,7 +278,8 @@ class KeyTap:
             if self.old_settings:
                 try:
                     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
-                except Exception:
+                except (termios.error, OSError, AttributeError):
+                    # Best-effort tty restore; never block process exit.
                     pass
     
     def get_pending_count(self) -> int:
@@ -1075,7 +1076,12 @@ async def dispatch_turn(
                                             cached_tokens = details.get("cached_tokens") or 0
                                     if "reasoning_tokens" in usage:
                                         reasoning_tokens = usage.get("reasoning_tokens") or 0
-                        except (json.JSONDecodeError, Exception):
+                        except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                            # Catch malformed SSE chunks / missing fields, but let
+                            # genuine network or programming errors propagate. The
+                            # prior `except (json.JSONDecodeError, Exception)` made
+                            # `Exception` swallow real bugs (JSONDecodeError was
+                            # already a subclass).
                             pass
 
             # Tokenize accumulated response for accurate completion token count
@@ -2329,7 +2335,10 @@ async def run_session_walk(
                                                 cached_tokens = details.get("cached_tokens") or 0
                                         if "reasoning_tokens" in usage:
                                             reasoning_tokens = usage.get("reasoning_tokens") or 0
-                            except (json.JSONDecodeError, Exception):
+                            except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                                # See parallel comment in traffic-replay path: narrow
+                                # the catch so real exceptions surface instead of being
+                                # masked by a blanket `except Exception`.
                                 pass
 
                 completion_tokens = len(tokenizer.encode(full_response, add_special_tokens=False)) if full_response else 0

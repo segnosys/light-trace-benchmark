@@ -106,7 +106,7 @@ def main(argv: List[str] | None = None):
         argv = sys.argv[1:]
     filtered_argv, extra_eval_metadata = _extract_extra_eval_metadata(parser, argv)
     args = parser.parse_args(filtered_argv)
-    setattr(args, "extra_eval_metadata", extra_eval_metadata)
+    args.extra_eval_metadata = extra_eval_metadata
     pprint(args.as_dict())
 
     # Validate LoRA arguments
@@ -142,11 +142,11 @@ def main(argv: List[str] | None = None):
                     f"Loaded {len(adapter_paths_list)} adapter path(s) from "
                     f"{args.adapter_paths_file}"
                 )
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             raise ValueError(
                 f"Adapter paths file not found: {args.adapter_paths_file}. "
                 "Please ensure the file exists and the path is correct."
-            )
+            ) from e
 
     # Validate that LoRA source and lora_ratio are specified together
     has_lora_source = bool(args.adapter_paths) or bool(args.lora_names)
