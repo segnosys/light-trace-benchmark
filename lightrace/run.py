@@ -211,6 +211,7 @@ def main(argv: List[str] | None = None):
         together_api_key=args.together_api_key,
         hf_dataset=args.hf_dataset,
         hf_dataset_split=args.hf_dataset_split,
+        hf_dataset_config=args.hf_dataset_config,
         hf_dataset_column_name=args.hf_dataset_column_name,
         synthetic_input_length=args.synthetic_input_length,
         synthetic_output_length=args.synthetic_output_length,

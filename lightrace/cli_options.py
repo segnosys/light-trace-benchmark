@@ -230,6 +230,13 @@ def huggingface_data_options(parser: ArgumentParser) -> None:
         default="test",
     )
     grp.add_argument(
+        "--hf_dataset_config",
+        type=str,
+        default=None,
+        help="Configuration name for the HuggingFace dataset (e.g. 'main' for "
+             "openai/gsm8k). Leave unset for datasets that don't have configs.",
+    )
+    grp.add_argument(
         "--hf_dataset_column_name",
         type=str,
         default="problem",

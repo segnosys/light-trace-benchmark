@@ -1,0 +1,29 @@
+# Workload: Replay your own prompts from a JSONL file
+#
+# Template — fill in `jsonl_input_path` to point at a file. Each line of
+# the file is a JSON object with a "prompt" field (or rename via
+# jsonl_dataset_column_name).
+#
+# Example file (one JSON object per line):
+#   {"prompt": "Explain how MLA differs from MHA in two sentences."}
+#   {"prompt": "Write a short bash script to back up /etc."}
+#   ...
+#
+# Useful for replaying captured production prompts, evaluating against a
+# curated set, or any time you don't want synthetic filler.
+
+provider: sglang
+traffic_pattern: concurrent
+concurrency: 16
+
+dataset_type: jsonl
+# REQUIRED: set this to an absolute path on disk.
+jsonl_input_path: /path/to/your/prompts.jsonl
+jsonl_dataset_column_name: prompt
+jsonl_convert_to_chat_request_format: 'false'
+num_examples: 128
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 256

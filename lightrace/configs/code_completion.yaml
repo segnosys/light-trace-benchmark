@@ -1,0 +1,26 @@
+# Workload: Tab-complete style code completion
+#
+# Small prompt (~2K tokens of surrounding code), tiny response (~64 tokens
+# of suggestion), open-loop arrivals at fixed QPS. Latency-critical: TTFT
+# p99 is the SLO that matters here.
+#
+# What it answers:
+#   - TTFT p50/p95/p99 under a sustained 10 QPS open-loop load
+#   - Whether the server can keep TTFT < O(100ms) at this rate
+
+provider: sglang
+traffic_pattern: qps
+qps_distribution: constant
+levels: '10'                    # 10 QPS, jsonargparse keeps str for levels
+duration: 30
+concurrency: 2                  # fallback if levels not set
+
+dataset_type: synthetic
+synthetic_input_length: 2000
+synthetic_output_length: 64
+num_examples: 500               # large enough that 30s * 10 QPS doesn't run out
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 64

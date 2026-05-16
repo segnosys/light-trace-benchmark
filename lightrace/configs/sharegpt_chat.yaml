@@ -1,0 +1,23 @@
+# Workload: ShareGPT-style multi-turn chat prompts
+#
+# Uses lightrace's sharegpt path (sample_random_requests with the model's
+# own tokenizer) to produce prompts of the target length. Good for chatbot
+# serving baselines when you don't want HF dataset auth.
+#
+# Note: requires --tokenizer_name (or --model_name) to be set on the CLI
+# so the prompt sampler knows how to size tokens. The vendored
+# get_tokenizer accepts either an HF repo id or a local model path.
+
+provider: sglang
+traffic_pattern: concurrent
+concurrency: 24
+
+dataset_type: sharegpt
+synthetic_input_length: 512             # target tokens/prompt (sampler honors this)
+synthetic_output_length: 256
+num_examples: 192
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 256

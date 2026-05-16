@@ -59,6 +59,7 @@ class InputPipeline:
         tokenizer_name: Optional[str] = None,
         hf_dataset: Optional[str] = None,
         hf_dataset_split: Optional[str] = None,
+        hf_dataset_config: Optional[str] = None,
         hf_dataset_column_name: Optional[str] = None,
         jsonl_input_path: Optional[str] = None,
         jsonl_dataset_column_name: Optional[str] = None,
@@ -100,6 +101,10 @@ class InputPipeline:
         self.dataset_type = dataset_type
         self.hf_dataset = hf_dataset
         self.hf_dataset_split = hf_dataset_split
+        # Treat "" and "None" like missing — same convention as gsp_*_config.
+        self.hf_dataset_config = (
+            None if hf_dataset_config in (None, "", "None") else hf_dataset_config
+        )
         self.hf_dataset_column_name = hf_dataset_column_name
         self.jsonl_input_path = jsonl_input_path
         self.jsonl_dataset_column_name = jsonl_dataset_column_name
@@ -229,7 +234,10 @@ class InputPipeline:
 
     def _build_hf_inputs(self) -> List[InferencePayload]:
 
-        dataset = datasets.load_dataset(self.hf_dataset, split=self.hf_dataset_split)
+        load_kwargs = {"split": self.hf_dataset_split}
+        if self.hf_dataset_config is not None:
+            load_kwargs["name"] = self.hf_dataset_config
+        dataset = datasets.load_dataset(self.hf_dataset, **load_kwargs)
 
         if self.num_examples:
             if self.num_examples > len(dataset):

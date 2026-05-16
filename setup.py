@@ -12,7 +12,10 @@ setup(
     packages=find_packages(include=["lightrace", "lightrace.*", "agent", "agent.*"]),
     # Bundle the workload YAMLs so `pip install lightrace` (no git clone) still
     # ships them — addresses the wheel-only-has-batch bug.
-    package_data={"agent": ["workloads/*.yaml"]},
+    package_data={
+        "agent": ["workloads/*.yaml"],
+        "lightrace": ["configs/*.yaml"],
+    },
     include_package_data=True,
     python_requires=">=3.10",
     classifiers=[

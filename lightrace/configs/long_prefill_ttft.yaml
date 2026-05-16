@@ -1,0 +1,24 @@
+# Workload: TTFT stress / long-prefill
+#
+# Very long prompt (~64K) with a short response. Isolates prefill cost —
+# decode is too short to matter. Useful for sizing prefill chunking and
+# attention-prefill bandwidth.
+#
+# What it answers:
+#   - Time-to-first-token for a 64K prompt at modest concurrency
+#   - Whether server's chunked-prefill keeps up at this concurrency
+#   - Per-GPU prefill throughput
+
+provider: sglang
+traffic_pattern: concurrent
+concurrency: 4                  # high prefill cost limits sane concurrency
+
+dataset_type: synthetic
+synthetic_input_length: 65000
+synthetic_output_length: 100
+num_examples: 16
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 100

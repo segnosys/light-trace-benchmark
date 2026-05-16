@@ -41,15 +41,52 @@ This installs three console scripts:
 | `lightrace-agent` | agent-mode driver (`agent.agent_throughput:main`) — multi-turn workload with growing prefixes |
 | `lightrace-agent-sweep` | QPS-sweep wrapper around `lightrace-agent` |
 
-The workload YAML profiles ship alongside the wheel. Discover them at runtime:
+Two sets of pre-built workload profiles ship inside the wheel:
+
+| set | for | discover via |
+|---|---|---|
+| `lightrace/configs/*.yaml` | `lightrace --config <path>` (batch mode) | `lightrace.configs_dir()` / `lightrace.list_configs()` |
+| `agent/workloads/*.yaml` | `lightrace-agent --workload-config <path>` | `agent.workloads_dir()` / `agent.list_workloads()` |
+
+Bundled batch profiles (typical scenarios — pick one and add `--base_url`/`--model_name`):
+
+| name | shape | what it stresses |
+|---|---|---|
+| `chat_short` | 200 in / 200 out / concurrent=32 | scheduling + decode throughput at ChatGPT-style traffic |
+| `rag_doc_qa` | 10K in / 300 out / concurrent=16 | prefill BW + attention on long context |
+| `code_completion` | 2K in / 64 out / qps=10 constant | TTFT SLO at sustained low-latency arrivals |
+| `reasoning_long_decode` | 2K in / 8K out / concurrent=8 | TPOT stability over long generation + KV pressure |
+| `long_prefill_ttft` | 65K in / 100 out / concurrent=4 | TTFT and chunked-prefill sizing |
+| `pure_cold_random` | 64K in / 800 out / concurrent=24 | mirrors the cg+profile kernel-decomposition workload |
+
+Bundled agent profiles (multi-turn shapes):
+
+| name | archetype |
+|---|---|
+| `code_agent_{16k,50k_cache90,64k_cache935_kimi,128k,200k}` | growing-prefix code-agent variants at different context sizes / cache-hit targets |
+| `code_agent_50k_cache90_{kimi,mxfp4}` | same shape with model-specific tokenizers |
+| `code_agent_50k_cache94_kimi` | tighter cache-hit target for the same Kimi tokenizer |
+| `chat_assistant_short` | ChatGPT-style: short prompts, high session-rotation rate |
+| `rag_oneshot` | single-turn RAG (`new_session_rate=1.0`), big retrieved context |
+
+Discover at runtime:
 
 ```python
-import agent
-print(agent.workloads_dir())   # /…/site-packages/agent/workloads
-print(agent.list_workloads())  # ['code_agent_128k', 'code_agent_16k', …]
+import lightrace, agent
+print(lightrace.configs_dir(), lightrace.list_configs())
+print(agent.workloads_dir(),   agent.list_workloads())
 ```
 
-Or pass any of them by absolute path to `--workload-config`.
+Or pass any of them by absolute path:
+
+```bash
+lightrace --config $(python -c 'import lightrace; print(lightrace.configs_dir() / "chat_short.yaml")') \
+          --base_url http://localhost:8001/v1 \
+          --model_name your/model --tokenizer_name your/tokenizer
+
+lightrace-agent --workload-config $(python -c 'import agent; print(agent.workloads_dir() / "rag_oneshot.yaml")') \
+                --server http://localhost:8001 --model your/model --tokenizer your/tokenizer
+```
 
 The legacy invocations `python3 agent/agent_throughput.py …` and
 `python3 agent/runner.py …` still work from a source checkout. The

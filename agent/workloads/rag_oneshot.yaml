@@ -1,0 +1,40 @@
+# Workload: Single-shot RAG / document Q&A (every "session" is one turn)
+#
+# Each request stands alone: a large retrieved context (~10K) plus a short
+# question, answer ~300 tokens. No multi-turn growth — sessions retire
+# after one turn (new_session_rate=1.0).
+#
+# Use this when you want RAG serving numbers from the agent driver's
+# QPS/ramp/burst machinery, without the multi-turn growth that code-agent
+# profiles assume.
+
+workload:
+  system_prompt_len:     200
+  initial_prefix_mean:   10000        # the retrieved context
+  initial_prefix_median: 9000
+  new_tokens_mean:       0            # no growth: each request is fresh
+  new_tokens_median:     0
+  max_prompt_tokens:     11000        # cap leaves room for response
+
+  new_session_rate:      1.0          # every "turn" starts a fresh session
+  session_decay_lambda:  1.0          # immediately retire after turn
+  initial_sessions:      16
+
+  generation_length_mean:   300
+  generation_length_median: 250
+
+  initial_qps:      0.5
+  max_qps:          4.0
+  ramp_duration:    30
+  sustain_duration: 180
+  max_inflight:     16
+  poisson:          true
+  poisson_shape:    2
+
+  acc_len:             1.0
+  mtp_overhead_factor: 1.0
+  mtp_draft_tokens:    3
+  tokenizer:           Qwen/Qwen3-30B-A3B
+  gpus:                1
+  window:              30
+  random_seed:         1337

@@ -1,0 +1,24 @@
+# Workload: Single-shot RAG / document Q&A
+#
+# Large retrieved context (~10K tokens) + short answer (~300 tokens). One
+# turn per request — no multi-turn growth. Stresses prefill throughput and
+# attention BW; modest decode.
+#
+# What it answers:
+#   - TTFT for ~10K-token prefill at moderate concurrency
+#   - Decode TPS once first token arrives
+#   - How much in-flight the server can hold without TTFT blowing up
+
+provider: sglang
+traffic_pattern: concurrent
+concurrency: 16
+
+dataset_type: synthetic
+synthetic_input_length: 10000
+synthetic_output_length: 300
+num_examples: 96                # 6 rounds at concurrency=16
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 300
