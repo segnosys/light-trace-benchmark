@@ -165,6 +165,16 @@ def estimate_ideal_cache_hit_rate(
         cacheable chunk is smaller, returns 0.0 for anthropic provider.
       * 5-min TTL is ignored — benchmark runs should fit inside one window.
 
+    Anthropic protocol notes:
+      Cache hits require the prefix UP TO AND INCLUDING the cache_control
+      marker to match across requests. AnthropicBackend places the marker:
+        - on the system block when messages-mode payloads have one
+        - on the cacheable-prefix block when InferencePayload.cacheable_prefix
+          is set (synthetic + synthetic_cached_input_length path)
+        - on the entire user block otherwise (same_prompts_in_burst path)
+      For dataset shapes where the marker can't be cleanly placed against a
+      shared prefix (e.g. generated-shared-prefix today), ideal returns 0.
+
     Returns None when the shape doesn't admit a clean estimate.
     """
     # Anthropic Sonnet/Haiku won't cache chunks below this; Opus is 2048.
@@ -202,6 +212,13 @@ def estimate_ideal_cache_hit_rate(
 
     # Case 3: generated-shared-prefix mode (gsp)
     if dataset_type == "generated-shared-prefix" and gsp_cached_fraction is not None:
+        # Anthropic protocol guardrail: gsp doesn't currently expose the
+        # shared-prefix boundary via InferencePayload.cacheable_prefix, so
+        # AnthropicBackend marks the whole content -> cache key includes the
+        # varying suffix -> 0% hit. Servers with implicit prefix caching
+        # (sglang, vllm, OpenAI radix) still work.
+        if provider == "anthropic":
+            return 0.0
         groups = max(1, gsp_groups or 1)
         # Per group: 1 write + (n_per_group - 1) reads
         n_per_group = max(1, num_examples // groups)

@@ -479,6 +479,16 @@ class InputPipeline:
 
         prompts = [build_prompt(index) for index in range(self.num_examples)]
 
+        # If a fixed cacheable prefix is configured, expose it on the payload so
+        # explicit-breakpoint backends (Anthropic) can split the prompt and
+        # mark only the prefix with cache_control. The prefix text is the same
+        # filler that build_prompt prepends to every prompt, so structural
+        # equality is guaranteed across requests.
+        cacheable_prefix_text = None
+        if self.synthetic_cached_input_length:
+            prefix_token_count = self.synthetic_cached_input_length // FILLER_TOKEN_COUNT
+            cacheable_prefix_text = FILLER_TOKEN_PHRASE * prefix_token_count
+
         requests = []
         for idx, prompt in enumerate(prompts):
             adapter_path, lora_name = self._pick_adapter_for_request(idx)
@@ -500,6 +510,7 @@ class InputPipeline:
                 top_p=self.top_p,
                 adapter_path=adapter_path,
                 lora_name=lora_name,
+                cacheable_prefix=cacheable_prefix_text,
             ))
         return requests
 

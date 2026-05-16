@@ -703,6 +703,24 @@ class AnthropicBackend(BaseBackend):
             return -1
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def _split_prompt_blocks(self, prompt: Optional[str], cacheable_prefix: Optional[str]):
+        """
+        Build a list of content blocks for a `prompt` payload. When the prompt
+        starts with a known cacheable prefix, split into [prefix, suffix] so
+        Anthropic's cache_control can sit on the prefix block.
+        """
+        prompt = prompt or ""
+        if cacheable_prefix and prompt.startswith(cacheable_prefix):
+            suffix = prompt[len(cacheable_prefix):]
+            if suffix:
+                return [
+                    {"type": "text", "text": cacheable_prefix},
+                    {"type": "text", "text": suffix},
+                ]
+            # Whole prompt is the cacheable prefix.
+            return [{"type": "text", "text": cacheable_prefix}]
+        return [{"type": "text", "text": prompt}]
+
     def _maybe_wrap_cache_control(self, blocks):
         """
         Attach `cache_control: {type: "ephemeral"}` to the LAST text block in
@@ -748,21 +766,36 @@ class AnthropicBackend(BaseBackend):
                         m = {**m, "content": [{"type": "text", "text": content}]}
                     message_list.append(m)
         else:
-            # `prompt` form -> single user message
+            # `prompt` form -> single user message. If a cacheable_prefix is
+            # known, split the prompt into [prefix_block, suffix_block] so the
+            # cache_control marker can sit on the prefix block alone — only
+            # the prefix needs to match across requests for a cache hit. Without
+            # the split, Anthropic's cache key includes the (varying) suffix
+            # and we get 0% hits.
+            content_blocks = self._split_prompt_blocks(
+                request.prompt, request.cacheable_prefix
+            )
             message_list.append({
                 "role": "user",
-                "content": [{"type": "text", "text": request.prompt}],
+                "content": content_blocks,
             })
 
         # Cache-control on the longest cacheable chunk:
         #   - prefer system blocks if present (most stable across requests)
-        #   - otherwise mark the user message
+        #   - otherwise: if the user message was already split with an explicit
+        #     prefix block, mark that block (not the trailing suffix); else
+        #     fall back to marking the rightmost text block (covers the
+        #     same-prompts-in-burst case where the whole prompt matches).
         if system_blocks:
             system_blocks = self._maybe_wrap_cache_control(system_blocks)
         elif message_list:
             last = message_list[-1]
             if isinstance(last.get("content"), list):
-                last["content"] = self._maybe_wrap_cache_control(last["content"])
+                if self.enable_prompt_caching and len(last["content"]) >= 2 and request.cacheable_prefix:
+                    # Mark the FIRST block (prefix); leave the suffix unmarked.
+                    last["content"][0]["cache_control"] = {"type": "ephemeral"}
+                else:
+                    last["content"] = self._maybe_wrap_cache_control(last["content"])
 
         body = {
             "model": self.model_name,

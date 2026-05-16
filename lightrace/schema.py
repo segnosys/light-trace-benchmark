@@ -79,6 +79,12 @@ class InferencePayload:
     lora_name: Optional[str] = None
     reasoning_effort: Optional[str] = None
     reasoning: Optional[dict] = None
+    # Explicit cache breakpoint hint. When set, backends that honor explicit
+    # cache markers (Anthropic) split the prompt at the end of this text and
+    # mark only the prefix portion with cache_control. Servers with implicit
+    # prefix-cache detection (sglang, vllm, OpenAI) ignore it — their radix
+    # trees pick up any shared prefix automatically.
+    cacheable_prefix: Optional[str] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
