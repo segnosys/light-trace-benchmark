@@ -31,7 +31,7 @@ import termios
 import tty
 from dataclasses import dataclass, field
 import yaml
-from typing import List, Dict, Tuple, Optional
+from typing import List, Tuple, Optional
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +50,7 @@ _ASCII_BYTES = np.array(list(_ASCII_CHARS.encode('ascii')), dtype=np.uint8)
 # Optional agent-style corpus replacement.
 # If env LIGHTRACE_AGENT_CORPUS is set, make_filler_seeded() returns text
 # composed of real code files from the corpus instead of random ASCII.
-import os as _os
+import os as _os  # noqa: E402  -- intentionally placed near the LIGHTRACE_AGENT_CORPUS block
 _AGENT_CORPUS_PATH = _os.environ.get("LIGHTRACE_AGENT_CORPUS")
 _AGENT_CORPUS = None  # lazy-loaded
 
@@ -114,7 +114,6 @@ def make_agent_filler_seeded(target_tokens: int, tokenizer, seed: int) -> str:
     # Approximate per-char token ratio. We slice tokens (not chars) directly,
     # avoiding decode/encode roundtrips for speed.
     accum_tokens = 0
-    target_str_chars = target_tokens * 5  # generous upper bound
 
     def _pick_entry():
         return corpus[int(rng.integers(0, len(corpus)))]
@@ -2356,9 +2355,14 @@ async def run_session_walk(
                     # Request completed but no content returned
                     metrics.requests_completed += 1
 
-                # Update session with response content (realistic mode includes response)
+                # Update session with response content (realistic mode includes response).
+                # Note: the user-turn tokens were already added at session.grow() above,
+                # so here we only grow by the *response* tokens. Prior code used a stale
+                # `new_content` name (NameError) and a back-compat shim that double-counted
+                # the user tokens.
                 response_tokens = len(tokenizer.encode(full_response, add_special_tokens=False)) if full_response else 0
-                session.add_content(new_content + "\n\n" + full_response, new_tokens + response_tokens, request_id)
+                if response_tokens:
+                    session.grow(response_tokens, request_id)
 
                 # Check retirement conditions
                 if session.should_retire(max_prompt_tokens) or session.should_retire_lifetime():
@@ -3020,14 +3024,10 @@ def run_preview(
         if new_tokens > available_space:
             new_tokens = max(1, available_space)
 
-        total_prompt_tokens = current_prefix_tokens + new_tokens
-
-        # Grow the session by new_tokens (extends the slice into pre-tokenized base)
+        # Grow the session by new_tokens (extends the slice into pre-tokenized base).
+        # In preview mode we don't fire the request, so we don't need the decoded
+        # full_content / total_prompt_tokens — those were dead locals.
         selected_session.grow(new_tokens, plan.request_id)
-
-        # Get the full prompt by decoding the current token slice
-        # This is exact - no drift, no truncation needed
-        full_content = selected_session.get_prompt()
 
         # Check if session should be retired
         if selected_session.should_retire(max_prompt_tokens):

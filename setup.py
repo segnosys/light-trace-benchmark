@@ -42,6 +42,13 @@ setup(
         # lightrace/_sglang_compat.py to avoid downgrading the server's sglang.
     ],
     extras_require={
+        # Optional Dash/Plotly viewer for agent-mode runs. Not pulled into
+        # the base install so a `pip install lightrace` of just the bench
+        # client stays small. Install with `pip install 'lightrace[viewer]'`.
+        "viewer": [
+            "dash>=2.0.0",
+            "plotly>=5.0.0",
+        ],
         "dev": [
             "pre-commit",
             "mypy",
@@ -51,6 +58,7 @@ setup(
             "pytest-aiohttp",
             "types-tabulate",
             "httpx",
+            "ruff",
         ],
     },
     entry_points={
@@ -61,6 +69,9 @@ setup(
             # git clone — now installable via pip too.
             "lightrace-agent = agent.agent_throughput:main",
             "lightrace-agent-sweep = agent.runner:main",
+            # Live Dash/Plotly viewer over `metrics.jsonl`. Requires the
+            # `viewer` extras: `pip install 'lightrace[viewer]'`.
+            "lightrace-viewer = agent.viewer:main",
         ],
     },
 )

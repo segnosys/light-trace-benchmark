@@ -14,7 +14,6 @@ row to results.csv / summary.md for easy post-hoc comparison.
 import argparse
 import csv
 import json
-import os
 import subprocess
 import time
 from datetime import datetime

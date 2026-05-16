@@ -3,7 +3,6 @@ Tests for the wheel-packaging fixes: agent/ and lightrace/configs/ should
 ship as part of the installed package, and the helper accessors should
 return paths that actually exist on disk.
 """
-import os
 
 import pytest
 

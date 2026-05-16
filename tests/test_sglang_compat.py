@@ -3,7 +3,6 @@ Tests for the vendored sglang helpers (lightrace/_sglang_compat.py) — the
 ones that replaced the sglang==0.5.2 pin that was downgrading server-side
 sglang on every install.
 """
-import os
 from unittest.mock import patch
 
 import pytest
@@ -17,15 +16,13 @@ def test_get_tokenizer_uses_local_files_only_for_abs_paths(tmp_path):
     fake_dir = tmp_path / "fake_model"
     fake_dir.mkdir()
 
-    with patch.object(compat, "AutoTokenizer", create=True) as mock_at_module:
-        # Mocking attribute access since the import is inside the function.
-        with patch("transformers.AutoTokenizer") as mock_at:
-            mock_at.from_pretrained.return_value = "tok"
-            result = compat.get_tokenizer(str(fake_dir))
-            mock_at.from_pretrained.assert_called_once()
-            kwargs = mock_at.from_pretrained.call_args.kwargs
-            assert kwargs["trust_remote_code"] is True
-            assert kwargs["local_files_only"] is True
+    with patch("transformers.AutoTokenizer") as mock_at:
+        mock_at.from_pretrained.return_value = "tok"
+        compat.get_tokenizer(str(fake_dir))
+        mock_at.from_pretrained.assert_called_once()
+        kwargs = mock_at.from_pretrained.call_args.kwargs
+        assert kwargs["trust_remote_code"] is True
+        assert kwargs["local_files_only"] is True
 
 
 def test_get_tokenizer_hf_repo_id_goes_through_cache():

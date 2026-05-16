@@ -6,7 +6,6 @@ Live dashboard for simulation benchmark visualization
 import json
 import argparse
 import statistics
-import colorsys
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
@@ -539,15 +538,31 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                     dt = datetime.strptime(timestamp_str, "%Y-%m-%d-%H-%M-%S")
                     time_display = dt.strftime("%b %d, %H:%M")
                     label = f"{trace.label}  -  {time_display}"
-                except:
+                except ValueError:
                     label = trace.label
             else:
                 label = trace.label
             options.append({'label': label, 'value': trace_id})
 
-        status = f"Found {len(benchmark_traces)} benchmark runs"
-        if new_count > 0:
-            status += f" (+{new_count} new)"
+        if not benchmark_traces:
+            # Empty-state UX: instead of a blank dashboard, tell the user
+            # where the viewer is looking and what shape it expects.
+            _data_dir_str = str(app.data_dir)
+            status = html.Div([
+                html.Strong("No benchmark runs found in "),
+                html.Code(_data_dir_str),
+                html.Br(),
+                html.Span(
+                    f"Launch a run with `lightrace-agent --data-dir {_data_dir_str} ...` "
+                    "and the dashboard will pick it up automatically. The viewer scans for "
+                ),
+                html.Code("<name>/<YYYY-MM-DD-HH-MM-SS>/metrics.jsonl"),
+                html.Span(" beneath the configured --data-dir."),
+            ], style={"color": "#6c757d", "padding": "10px", "lineHeight": "1.6"})
+        else:
+            status = f"Found {len(benchmark_traces)} benchmark runs"
+            if new_count > 0:
+                status += f" (+{new_count} new)"
 
         # Update traces with latest data
         selected_traces = selected_traces or []
@@ -1825,11 +1840,9 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
 
                 # Sessions
                 num_active = latest.num_sessions_active if latest else 0
-                num_retired = latest.num_sessions_retired if latest else 0
                 num_abandoned = latest.num_sessions_abandoned if latest else 0
                 num_total = latest.num_sessions_total if latest else 0
                 created_by_rate = latest.sessions_created_by_rate if latest else 0
-                abandoned_by_rate = latest.sessions_abandoned_by_rate if latest else 0
                 results_rows.append(html.Div([
                     html.Span("Sessions", className='stats-label'),
                     html.Span(f"{num_active}/{num_total} (+{created_by_rate} -{num_abandoned})", className='stats-value')
@@ -2072,7 +2085,7 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                     for d in sched_with_ts:
                         try:
                             timestamps.append(dt.fromisoformat(d['timestamp']))
-                        except:
+                        except (ValueError, TypeError, KeyError):
                             pass
 
                     if timestamps:
@@ -2119,7 +2132,7 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                     for d in batch_with_ts:
                         try:
                             timestamps.append(dt.fromisoformat(d['timestamp']))
-                        except:
+                        except (ValueError, TypeError, KeyError):
                             pass
 
                     if timestamps:

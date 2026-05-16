@@ -4,7 +4,6 @@ Tests for the workload-predicted ideal cache hit rate.
 Covers all branches of estimate_ideal_cache_hit_rate, with explicit focus on
 Anthropic's protocol semantics (1024-token min, marker-position constraints).
 """
-import math
 
 import pytest
 
