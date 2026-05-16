@@ -6,7 +6,7 @@ from typing import List, Optional
 
 import datasets
 import numpy as np
-from sglang.bench_serving import get_tokenizer, sample_random_requests
+from lightrace._sglang_compat import get_tokenizer, sample_random_requests
 from together import Together
 from tqdm import tqdm
 
@@ -19,10 +19,12 @@ FILLER_TOKEN_COUNT: int = 2
 PREFIX_CACHE_DATASET = "emozilla/pg19"
 PREFIX_CACHE_COLUMN = "text"
 
-# Default non-cacheable dataset (can be overridden by user args)
-DEFAULT_SUFFIX_DATASET = (
-    "togethercomputer/Openhands-R2E-Gym-Subset-Qwen3-Coder-480B-0908_max100_temp0.7_topp0.8"
-)
+# Default non-cacheable dataset for generated-shared-prefix.
+# Must be publicly accessible; the previous default was a private togethercomputer
+# org dataset that failed on fresh installs with DatasetNotFoundError.
+DEFAULT_SUFFIX_DATASET = "HuggingFaceH4/MATH-500"
+DEFAULT_SUFFIX_DATASET_COLUMN = "problem"
+DEFAULT_SUFFIX_DATASET_SPLIT = "test"
 
 
 def replicate_inputs_per_batch(
@@ -124,16 +126,25 @@ class InputPipeline:
         self.use_temperature_top_p_from_jsonl_args = use_temperature_top_p_from_jsonl_args
         self.gsp_cached_fraction = gsp_cached_fraction
         self.gsp_hf_dataset = gsp_hf_dataset or DEFAULT_SUFFIX_DATASET
-        self.gsp_hf_dataset_split = gsp_hf_dataset_split or "train"
+        self.gsp_hf_dataset_split = gsp_hf_dataset_split or DEFAULT_SUFFIX_DATASET_SPLIT
+        # Treat the literal strings "None" and "" as "no config" so users can
+        # explicitly opt out via CLI without jsonargparse rejecting the empty
+        # string. None / "default" are also fine.
         self.gsp_hf_dataset_config = (
-            gsp_hf_dataset_config if gsp_hf_dataset_config != "None" else None
+            None
+            if gsp_hf_dataset_config in (None, "", "None")
+            else gsp_hf_dataset_config
         )
         self.gsp_cacheable_dataset = gsp_cacheable_dataset or PREFIX_CACHE_DATASET
         self.gsp_cacheable_dataset_split = gsp_cacheable_dataset_split or "train"
         self.gsp_cacheable_dataset_config = (
-            gsp_cacheable_dataset_config if gsp_cacheable_dataset_config != "None" else None
+            None
+            if gsp_cacheable_dataset_config in (None, "", "None")
+            else gsp_cacheable_dataset_config
         )
-        self.gsp_hf_dataset_column_name = gsp_hf_dataset_column_name or "input"
+        self.gsp_hf_dataset_column_name = (
+            gsp_hf_dataset_column_name or DEFAULT_SUFFIX_DATASET_COLUMN
+        )
         self.gsp_cacheable_dataset_column_name = gsp_cacheable_dataset_column_name or "text"
         self.gsp_groups = gsp_groups
         self.traffic_pattern = traffic_pattern
@@ -235,12 +246,31 @@ class InputPipeline:
             request_kwargs = {}
 
             if self.chat:
-                request_kwargs["messages"] = example[self.hf_dataset_column_name]
-                if isinstance(request_kwargs["messages"], str):
-                    request_kwargs["messages"] = json.loads(request_kwargs["messages"])
-                assert isinstance(
-                    request_kwargs["messages"], list
-                ), "Messages needs to be a list or json string of list of messages"
+                raw = example[self.hf_dataset_column_name]
+                # Accept three shapes: already-a-list (good), JSON-encoded list
+                # (decode), or raw plain text (auto-wrap as a user turn).
+                if isinstance(raw, list):
+                    request_kwargs["messages"] = raw
+                elif isinstance(raw, str):
+                    stripped = raw.strip()
+                    if stripped.startswith("[") and stripped.endswith("]"):
+                        try:
+                            decoded = json.loads(raw)
+                            if isinstance(decoded, list):
+                                request_kwargs["messages"] = decoded
+                            else:
+                                request_kwargs["messages"] = [{"role": "user", "content": raw}]
+                        except json.JSONDecodeError:
+                            request_kwargs["messages"] = [{"role": "user", "content": raw}]
+                    else:
+                        # Plain-text column: wrap as a single user message
+                        # instead of crashing on json.loads.
+                        request_kwargs["messages"] = [{"role": "user", "content": raw}]
+                else:
+                    raise TypeError(
+                        f"hf column '{self.hf_dataset_column_name}' has unsupported type "
+                        f"{type(raw).__name__}; expected list, str, or JSON-encoded list."
+                    )
             else:
                 request_kwargs["prompt"] = example[self.hf_dataset_column_name]
 

@@ -1,15 +1,21 @@
 # LightTrace / optimus-agent-bench
 
-Inference endpoint benchmarking tool. Two top-level modes share one CLI:
+Inference endpoint benchmarking tools. **Two separate entry points**, one per
+workload shape:
 
-* **`batch`** — open-loop / closed-loop synthetic traffic (burst, concurrent,
-  QPS). Measures raw throughput and TTFT under controlled load. This is the
-  classic LightTrace behavior.
-* **`agent`** — interactive code-agent workload. Multi-turn sessions with a
-  growing prefix (so a realistic fraction of each request is cache-hittable),
-  plus configurable human/machine wait time between turns.
+* **`lightrace`** — `batch` mode. Open-loop / closed-loop synthetic traffic
+  (burst, concurrent, QPS). Measures raw throughput and TTFT under controlled
+  load. This is the classic LightTrace behavior. Entry point:
+  `lightrace.run:main`, console script `lightrace`.
+* **`agent/agent_throughput.py`** — agent mode. Interactive code-agent workload
+  with multi-turn sessions, growing prefixes (so a realistic fraction of each
+  request is cache-hittable), configurable human/machine wait time between
+  turns, and an optional QPS sweep wrapper at `agent/runner.py`.
 
-Pick the mode with `--mode`. All other flags are mode-scoped.
+These are two distinct programs with their own CLIs. There is **no unified
+`--mode` flag** today — the README originally claimed one but the work to
+merge them isn't done. Use the table below to pick the right tool, then read
+the section that matches.
 
 ## Supported Backends
 
@@ -27,16 +33,20 @@ Or with Docker:
 docker build -t lightrace .
 ```
 
-This installs two console scripts:
+This installs one console script:
 
 | command | what it does |
 |---|---|
-| `optimus-agent-bench` | recommended entry point; supports both `--mode batch` and `--mode agent` |
-| `lightrace` | legacy alias of the same entry point (defaults to `--mode batch`) |
+| `lightrace` | batch-mode entry point (open-loop / closed-loop synthetic load) |
+
+The `optimus-agent-bench` name appears in earlier doc copy but is not
+registered today. For agent-style workloads run `python3 agent/agent_throughput.py …`
+directly, or the QPS-sweep wrapper at `python3 agent/runner.py …` — see
+[Mode 2 — agent](#mode-2--agent) below.
 
 ---
 
-## Mode 1 — `batch`
+## Mode 1 — `batch` (entry point: `lightrace`)
 
 Synthetic traffic shaped by one of three patterns. Choose `--traffic_pattern`.
 
@@ -46,7 +56,7 @@ Sends batched requests at a fixed concurrency level with configurable intervals
 between batches.
 
 ```bash
-optimus-agent-bench --mode batch \
+lightrace \
   --provider sglang \
   --base_url http://localhost:30000/v1 \
   --model_name Qwen/Qwen2.5-72B-Instruct \
@@ -68,7 +78,7 @@ optimus-agent-bench --mode batch \
 N workers, each sends a new request as soon as the previous one completes.
 
 ```bash
-optimus-agent-bench --mode batch \
+lightrace \
   --traffic_pattern concurrent \
   --concurrency 32 \
   ...
@@ -79,7 +89,7 @@ optimus-agent-bench --mode batch \
 Requests arrive at a target rate with configurable inter-arrival distribution.
 
 ```bash
-optimus-agent-bench --mode batch \
+lightrace \
   --traffic_pattern qps \
   --levels 4 \
   --duration 30 \
@@ -99,25 +109,27 @@ optimus-agent-bench --mode batch \
 
 ---
 
-## Mode 2 — `agent`
+## Mode 2 — agent (entry point: `agent/agent_throughput.py`)
 
 Multi-turn agent workload. Sessions grow turn-by-turn so the server's prefix
 cache gets exercised the way it would in production. Two sub-modes choose
 where the turn content comes from.
 
-### Sub-mode A — `--agent-input random` (default)
+This mode is a separate program from `lightrace` and has its own CLI; see
+`python3 agent/agent_throughput.py --help`. The `agent/runner.py` wrapper
+sweeps QPS levels by re-invoking `agent_throughput.py`.
+
+### Sub-mode A — random / synthesized turns (default)
 
 Synthesizes turns from random ASCII or, when `LIGHTRACE_AGENT_CORPUS` is set,
 from a local code corpus. Prompt and generation lengths are sampled from
-configurable lognormal distributions. This is the legacy
-`agent_throughput.py` workload.
+configurable lognormal distributions.
 
 ```bash
-optimus-agent-bench --mode agent \
-  --provider sglang --base_url http://localhost:8001 \
-  --model_name qwen3-30b-a3b-nvfp4 \
+python3 agent/agent_throughput.py \
+  --server http://localhost:8001 \
+  --model qwen3-30b-a3b-nvfp4 \
   --tokenizer Qwen/Qwen3-30B-A3B \
-  --agent-input random \
   --workload-config agent/workloads/code_agent_128k.yaml \
   --max-qps 0.3 --ramp-duration 45 --sustain-duration 300
 ```
@@ -126,7 +138,7 @@ YAML profiles under `agent/workloads/` parameterize prompt growth, session
 selection bias, and arrival shape. See `agent/README.md` for the full field
 reference.
 
-### Sub-mode B — `--agent-input dataset`
+### Sub-mode B — replay-from-dataset (experimental)
 
 Replay real agent traces. Default dataset is
 [`Inferact/codex_swebenchpro_traces`](https://huggingface.co/datasets/Inferact/codex_swebenchpro_traces)
@@ -138,16 +150,10 @@ first `2K-1` turns as its prompt; the K-th assistant turn's recorded length
 becomes the `max_tokens` for that call. Server gets the real prompt
 distribution from a working coding agent.
 
-```bash
-optimus-agent-bench --mode agent \
-  --provider sglang --base_url http://localhost:8001 \
-  --model_name qwen3-30b-a3b-nvfp4 \
-  --tokenizer Qwen/Qwen3-30B-A3B \
-  --agent-input dataset \
-  --agent-dataset Inferact/codex_swebenchpro_traces \
-  --agent-dataset-max-traces 100 \
-  --max-inflight 16
-```
+Note: the prior README copy described `--agent-input dataset` /
+`--agent-dataset` flags. Those flags are not currently wired into
+`agent_throughput.py --help`; see `agent/README.md` for the actually
+supported configuration.
 
 Measured properties of `Inferact/codex_swebenchpro_traces` (100-trace sample,
 char-count proxy — confirms the dataset card's 94.2% self-report):
@@ -305,20 +311,20 @@ explanation.
 ### YAML Config
 
 ```bash
-optimus-agent-bench --config my_benchmark.yaml
+lightrace --config my_benchmark.yaml
 ```
 
 ### W&B Tracking
 
 ```bash
-optimus-agent-bench --wandb_enabled true --wandb_project my-project \
+lightrace --wandb_enabled true --wandb_project my-project \
   --wandb_tags "70b,sglang,burst"
 ```
 
 ### LoRA Benchmarking (batch mode)
 
 ```bash
-optimus-agent-bench --mode batch \
+lightrace \
   --adapter_paths "s3://bucket/lora1,s3://bucket/lora2" \
   --lora_ratio 0.5 \
   --lora_distribution round_robin \
@@ -330,14 +336,14 @@ optimus-agent-bench --mode batch \
 Attach custom metadata columns to the CSV output:
 
 ```bash
-optimus-agent-bench --extra-server us-east-1 --extra-gpu-type b200 ...
+lightrace --extra-server us-east-1 --extra-gpu-type b200 ...
 ```
 
 ### Multi-Level Sweeps (batch mode)
 
 ```bash
-optimus-agent-bench --traffic_pattern burst --levels "4,8,16,32" ...
-optimus-agent-bench --traffic_pattern qps --levels "1,2,4,8" --duration 60 ...
+lightrace --traffic_pattern burst --levels "4,8,16,32" ...
+lightrace --traffic_pattern qps --levels "1,2,4,8" --duration 60 ...
 ```
 
 For agent mode, use `agent/runner.py` for QPS sweeps and SLO-driven binary

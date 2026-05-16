@@ -85,6 +85,37 @@ def compute_distribution(values: List[int]) -> OutputDistribution:
     )
 
 
+def _compute_per_device(
+    *,
+    results: List[ResultEntry],
+    per_batch_elapsed_times: Optional[List[float]],
+    traffic_level: float,
+    num_gpus: Optional[int],
+    total_elapse_time_s: float,
+) -> DeviceThroughput:
+    """
+    Per-GPU throughput. Uses per-batch data when available (burst pattern);
+    otherwise falls back to total_decode_tokens / total_elapsed / num_gpus
+    so concurrent/qps modes still report a meaningful number instead of 0.
+    """
+    if num_gpus is None or num_gpus <= 0:
+        return DeviceThroughput(num_gpus=-1, tps_mean=0, tps_stdev=0)
+
+    if per_batch_elapsed_times:
+        return compute_device_throughput(
+            results, per_batch_elapsed_times, int(traffic_level), num_gpus
+        )
+
+    # Fallback: aggregate decode tokens / wall time / GPU count.
+    total_output = sum(
+        r.metrics.output_token_count
+        for r in results
+        if r.metrics and r.metrics.output_token_count
+    )
+    tps = (total_output / total_elapse_time_s / num_gpus) if total_elapse_time_s > 0 else 0.0
+    return DeviceThroughput(num_gpus=num_gpus, tps_mean=tps, tps_stdev=0.0)
+
+
 def compute_device_throughput(
     results: List[ResultEntry],
     per_batch_elapsed_times: List[float],
@@ -182,12 +213,12 @@ def summarize_benchmark(
             actual_qps=len(results) / total_elapse_time_s,
             num_failed_requests=len(results) - len(success_results),
         ),
-        per_device=(
-            DeviceThroughput(-1 if num_gpus is None else num_gpus, 0, 0)
-            if per_batch_elapsed_times is None or num_gpus is None
-            else compute_device_throughput(
-                success_results, per_batch_elapsed_times, int(traffic_level), num_gpus
-            )
+        per_device=_compute_per_device(
+            results=success_results,
+            per_batch_elapsed_times=per_batch_elapsed_times,
+            traffic_level=traffic_level,
+            num_gpus=num_gpus,
+            total_elapse_time_s=total_elapse_time_s,
         ),
         accept_ratio=(
             extract_accept_rate_from_responses(

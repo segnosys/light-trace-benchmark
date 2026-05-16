@@ -214,10 +214,15 @@ def data_source_options(parser: ArgumentParser) -> None:
 
 def huggingface_data_options(parser: ArgumentParser) -> None:
     grp = parser.add_argument_group("HuggingFace dataset configurations")
+    # NOTE: defaults must be publicly accessible. The previous default
+    # (togethercomputer/tore-speed-eval-arena-hard-auto) is private and
+    # produced DatasetNotFoundError on fresh installs.
     grp.add_argument(
         "--hf_dataset",
         type=str,
-        default="togethercomputer/tore-speed-eval-arena-hard-auto",
+        default="HuggingFaceH4/MATH-500",
+        help="HuggingFace dataset id. Default is a small public reasoning set; "
+             "swap in your own with --hf_dataset_column_name as appropriate.",
     )
     grp.add_argument(
         "--hf_dataset_split",
@@ -227,7 +232,10 @@ def huggingface_data_options(parser: ArgumentParser) -> None:
     grp.add_argument(
         "--hf_dataset_column_name",
         type=str,
-        default="messages",
+        default="problem",
+        help="Column with the prompt text (for --chat false) or a JSON-encoded "
+             "chat-messages list (for --chat true). Default 'problem' matches "
+             "MATH-500.",
     )
 
 
@@ -307,29 +315,27 @@ def shared_prefix_data_options(parser: ArgumentParser) -> None:
         ),
     )
 
+    # NOTE: default must be publicly accessible. Previous default was a private
+    # togethercomputer dataset that 404'd for non-Together users.
     grp.add_argument(
         "--gsp_hf_dataset",
         type=str,
-        default=(
-            "togethercomputer/Openhands-R2E-Gym-Subset-"
-            "Qwen3-Coder-480B-0908_max100_temp0.7_topp0.8"
-        ),
-        help="HuggingFace dataset to use for generated shared prefix prompts.",
+        default="HuggingFaceH4/MATH-500",
+        help="HuggingFace dataset to use for generated shared prefix prompts. "
+             "Default is a small public reasoning set.",
     )
     grp.add_argument(
         "--gsp_hf_dataset_split",
         type=str,
-        default="train",
+        default="test",
         help="Split of the HuggingFace dataset to use.",
     )
     grp.add_argument(
         "--gsp_hf_dataset_config",
         type=str,
-        default="completions",
-        help=(
-            "Configuration name for the HuggingFace dataset "
-            "(e.g., 'completions', 'processed')."
-        ),
+        default=None,
+        help="Configuration name for the HuggingFace dataset (e.g. 'completions'). "
+             "Leave unset (or pass 'None') for datasets without configs.",
     )
 
     grp.add_argument(
@@ -353,8 +359,9 @@ def shared_prefix_data_options(parser: ArgumentParser) -> None:
     grp.add_argument(
         "--gsp_hf_dataset_column_name",
         type=str,
-        default="input",
-        help="Column name in the non-cacheable dataset (default: 'input' for Openhands).",
+        default="problem",
+        help="Column with prompt text in the non-cacheable dataset. "
+             "Default 'problem' matches MATH-500; use 'input' for Openhands.",
     )
     grp.add_argument(
         "--gsp_cacheable_dataset_column_name",

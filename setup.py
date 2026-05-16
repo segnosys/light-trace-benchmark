@@ -17,17 +17,22 @@ setup(
         "Operating System :: OS Independent",
     ],
     install_requires=[
-        "transformers==4.56.2",
+        # NOTE: pin transformers to a version that handles local-filesystem
+        # tokenizer paths well; 4.56.2 + huggingface_hub 0.36 reject abs paths
+        # via validate_repo_id. Bump if you hit that.
+        "transformers>=4.56.2",
         "orjson",
-        "datasets==4.1.1",
-        "aiohttp==3.12.15",
+        "datasets>=4.0",
+        "aiohttp>=3.10",
         "jsonargparse",
         "tabulate",
         "together",
         "Jinja2>=3.1.0",
         "wandb",
-        "sglang==0.5.2",
         "pybase64",
+        # Previously: sglang==0.5.2. Removed — the two helpers we used
+        # (get_tokenizer, sample_random_requests) are now vendored in
+        # lightrace/_sglang_compat.py to avoid downgrading the server's sglang.
     ],
     extras_require={
         "dev": [
