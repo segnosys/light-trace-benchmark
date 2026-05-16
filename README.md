@@ -387,6 +387,29 @@ Look for the **Phase Throughput Breakdown** in stdout; the `sustain` row is
 the capacity number to quote. See `agent/README.md` for the column-by-column
 explanation.
 
+### Live dashboard
+
+For agent-mode runs there's a Dash/Plotly viewer at `agent/viewer.py`
+(invoke via `python -m agent.viewer --data-dir <runs>` or `./agent/run_viewer.sh`).
+Install the optional deps with `pip install dash plotly` (not part of
+`install_requires`).
+
+The viewer binds to `0.0.0.0:8050` so a remote dev box exposes it at
+`http://<host>:8050`. If the port isn't open in the firewall, use SSH local
+port forwarding from your laptop:
+
+```bash
+ssh -N -L 8050:localhost:8050 user@remote-dev-host
+# now open http://localhost:8050 in a browser on the laptop
+```
+
+Add the forward to `~/.ssh/config` (`LocalForward 8050 localhost:8050`) to
+make it automatic. Multiple viewers on different ports? Add `-L 8051:...`
+flags as needed. Through a jump host? `ssh -J jump-host ...`.
+
+See `agent/README.md` for the full SSH port-forward recipes (including
+`~/.ssh/config` templates and behind-a-bastion patterns).
+
 ---
 
 ## Advanced Options
