@@ -190,3 +190,8 @@ class BenchmarkReport:
     # Aggregated cache stats across the run; None if no backend reported cache info.
     cache_hit_rate: Optional[StatsSummary] = None
     total_cached_input_tokens: Optional[int] = None
+    # Workload-predicted ideal cache hit rate (0..1). Filled in by run.py from
+    # the workload parameters (same_prompts_in_burst, synthetic_cached_input_length,
+    # gsp_cached_fraction, etc.). Compare against cache_hit_rate.mean to spot
+    # broken or absent cache reporting on the server side.
+    ideal_cache_hit_rate: Optional[float] = None

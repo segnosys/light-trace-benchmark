@@ -137,6 +137,88 @@ def compute_device_throughput(
     )
 
 
+def estimate_ideal_cache_hit_rate(
+    *,
+    provider: str,
+    dataset_type: str,
+    num_examples: int,
+    concurrency: Optional[int] = None,
+    max_num_burst: Optional[int] = None,
+    same_prompts_in_burst: bool = False,
+    synthetic_input_length: Optional[int] = None,
+    synthetic_cached_input_length: Optional[int] = None,
+    gsp_cached_fraction: Optional[float] = None,
+    gsp_groups: Optional[int] = None,
+    traffic_pattern: Optional[str] = None,
+) -> Optional[float]:
+    """
+    Predicted per-request cache hit ratio from workload params.
+
+    Compare this against the server-reported cache_hit_rate.mean to spot:
+      - cache feature disabled / misconfigured server (actual << ideal)
+      - over-attribution / double-counting (actual > ideal by a wide margin)
+      - workload that simply can't hit cache (returns None)
+
+    Approximations:
+      * "First request creates, rest hit" — assumes no eviction within the run.
+      * Anthropic Sonnet/Haiku minimum cacheable size is 1024 tokens; if the
+        cacheable chunk is smaller, returns 0.0 for anthropic provider.
+      * 5-min TTL is ignored — benchmark runs should fit inside one window.
+
+    Returns None when the shape doesn't admit a clean estimate.
+    """
+    # Anthropic Sonnet/Haiku won't cache chunks below this; Opus is 2048.
+    anthropic_min_cacheable = 1024 if provider == "anthropic" else 0
+
+    # Case 1: identical prompts repeated -> trivially cacheable
+    if same_prompts_in_burst:
+        bursts = max(1, max_num_burst or 1)
+        per_burst = max(1, concurrency or 1)
+        total = bursts * per_burst
+        if total <= 1:
+            return 0.0
+        # Each burst: 1 write + (per_burst - 1) reads. Across all bursts the
+        # avg hit per request is approximately (per_burst - 1) / per_burst,
+        # ignoring cross-burst sharing (which would only help).
+        avg_hit = (per_burst - 1) / per_burst
+        # Anthropic only caches >= 1024-token chunks.
+        if synthetic_input_length and synthetic_input_length < anthropic_min_cacheable:
+            return 0.0
+        return avg_hit
+
+    # Case 2: synthetic with a fixed cacheable prefix
+    if (
+        dataset_type == "synthetic"
+        and synthetic_cached_input_length
+        and synthetic_input_length
+        and synthetic_input_length > 0
+    ):
+        # First request creates cache, rest read. Over num_examples:
+        eff = max(0.0, (num_examples - 1) / num_examples) if num_examples else 0.0
+        cache_frac = synthetic_cached_input_length / synthetic_input_length
+        if synthetic_cached_input_length < anthropic_min_cacheable:
+            return 0.0
+        return eff * cache_frac
+
+    # Case 3: generated-shared-prefix mode (gsp)
+    if dataset_type == "generated-shared-prefix" and gsp_cached_fraction is not None:
+        groups = max(1, gsp_groups or 1)
+        # Per group: 1 write + (n_per_group - 1) reads
+        n_per_group = max(1, num_examples // groups)
+        if n_per_group <= 1:
+            return 0.0
+        eff = (n_per_group - 1) / n_per_group
+        # Approximate cacheable size from gsp_cached_fraction * total prompt.
+        if synthetic_input_length:
+            approx_cached_tokens = synthetic_input_length * gsp_cached_fraction
+            if approx_cached_tokens < anthropic_min_cacheable:
+                return 0.0
+        return eff * gsp_cached_fraction
+
+    # No clean estimate (sharegpt random, hf one-shot, jsonl, etc.)
+    return None
+
+
 def summarize_benchmark(
     traffic_mode: str,
     traffic_level: float,
@@ -150,6 +232,7 @@ def summarize_benchmark(
     hf_dataset_name: Optional[str] = None,
     engine_log_path: Optional[str] = None,
     accept_rate_pattern: Optional[str] = None,
+    ideal_cache_hit_rate: Optional[float] = None,
 ) -> BenchmarkReport:
     success_results = [result for result in results if result.success]
 
@@ -235,6 +318,7 @@ def summarize_benchmark(
         hf_dataset_name=hf_dataset_name,
         cache_hit_rate=_extract_cache_hit_rate(success_results, histogram_metrics),
         total_cached_input_tokens=_sum_cached_input_tokens(success_results),
+        ideal_cache_hit_rate=ideal_cache_hit_rate,
     )
 
 
@@ -321,10 +405,28 @@ def render_report(report: BenchmarkReport) -> None:
                 ),
                 (
                     ["", ""]
+                    if report.ideal_cache_hit_rate is None
+                    else [
+                        "Ideal cache hit rate (workload-predicted):",
+                        f"{100 * report.ideal_cache_hit_rate:.1f}%",
+                    ]
+                ),
+                (
+                    ["", ""]
                     if report.cache_hit_rate is None
                     else [
-                        "Prompt cache hit rate:",
+                        "Prompt cache hit rate (server-reported):",
                         f"{100 * report.cache_hit_rate.mean:.1f}% +/- {100 * report.cache_hit_rate.stdev:.1f}%",
+                    ]
+                ),
+                (
+                    ["", ""]
+                    if (report.cache_hit_rate is None
+                        or report.ideal_cache_hit_rate is None
+                        or report.ideal_cache_hit_rate <= 0)
+                    else [
+                        "Cache efficiency (server / ideal):",
+                        f"{100 * report.cache_hit_rate.mean / report.ideal_cache_hit_rate:.1f}%",
                     ]
                 ),
                 (
