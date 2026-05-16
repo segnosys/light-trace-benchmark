@@ -33,16 +33,28 @@ Or with Docker:
 docker build -t lightrace .
 ```
 
-This installs one console script:
+This installs three console scripts:
 
 | command | what it does |
 |---|---|
 | `lightrace` | batch-mode entry point (open-loop / closed-loop synthetic load) |
+| `lightrace-agent` | agent-mode driver (`agent.agent_throughput:main`) — multi-turn workload with growing prefixes |
+| `lightrace-agent-sweep` | QPS-sweep wrapper around `lightrace-agent` |
 
-The `optimus-agent-bench` name appears in earlier doc copy but is not
-registered today. For agent-style workloads run `python3 agent/agent_throughput.py …`
-directly, or the QPS-sweep wrapper at `python3 agent/runner.py …` — see
-[Mode 2 — agent](#mode-2--agent) below.
+The workload YAML profiles ship alongside the wheel. Discover them at runtime:
+
+```python
+import agent
+print(agent.workloads_dir())   # /…/site-packages/agent/workloads
+print(agent.list_workloads())  # ['code_agent_128k', 'code_agent_16k', …]
+```
+
+Or pass any of them by absolute path to `--workload-config`.
+
+The legacy invocations `python3 agent/agent_throughput.py …` and
+`python3 agent/runner.py …` still work from a source checkout. The
+`optimus-agent-bench` name from earlier doc copy is **not** a registered
+script — earlier README claims of a unified `--mode` flag were aspirational.
 
 ---
 
@@ -126,6 +138,15 @@ from a local code corpus. Prompt and generation lengths are sampled from
 configurable lognormal distributions.
 
 ```bash
+# After pip install:
+lightrace-agent \
+  --server http://localhost:8001 \
+  --model qwen3-30b-a3b-nvfp4 \
+  --tokenizer Qwen/Qwen3-30B-A3B \
+  --workload-config "$(python3 -c 'import agent; print(agent.workloads_dir() / "code_agent_128k.yaml")')" \
+  --max-qps 0.3 --ramp-duration 45 --sustain-duration 300
+
+# Or from a source checkout (legacy form, still works):
 python3 agent/agent_throughput.py \
   --server http://localhost:8001 \
   --model qwen3-30b-a3b-nvfp4 \

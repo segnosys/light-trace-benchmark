@@ -9,7 +9,11 @@ setup(
     description="LightRace Inference Benchmark",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(include=["lightrace", "lightrace.*"]),
+    packages=find_packages(include=["lightrace", "lightrace.*", "agent", "agent.*"]),
+    # Bundle the workload YAMLs so `pip install lightrace` (no git clone) still
+    # ships them — addresses the wheel-only-has-batch bug.
+    package_data={"agent": ["workloads/*.yaml"]},
+    include_package_data=True,
     python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -49,6 +53,11 @@ setup(
     entry_points={
         "console_scripts": [
             "lightrace = lightrace.run:main",
+            # Agent mode (multi-turn / code-agent workload). Was previously
+            # only reachable via `python3 agent/agent_throughput.py` from a
+            # git clone — now installable via pip too.
+            "lightrace-agent = agent.agent_throughput:main",
+            "lightrace-agent-sweep = agent.runner:main",
         ],
     },
 )
