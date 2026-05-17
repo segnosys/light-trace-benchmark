@@ -25,10 +25,6 @@ import uuid
 import numpy as np
 import math
 import sys
-import select
-import threading
-import termios
-import tty
 from dataclasses import dataclass, field
 import yaml
 from typing import List, Tuple, Optional
@@ -36,6 +32,21 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 from transformers import AutoTokenizer
+
+# Extracted into cohesive leaf modules; re-exported here for back-compat
+# with the rest of the agent_throughput.py code (run_replay, run_session_walk,
+# etc. still use Colors / KeyTap / MIN_THINK_TIME etc. by bare name).
+from agent.console import Colors, KeyTap  # noqa: F401,E402
+from agent.sampling import (  # noqa: F401,E402
+    MAX_INTER_ARRIVAL_TIME,
+    MAX_RETRIES,
+    MAX_THINK_TIME,
+    MIN_GENERATION_TIME,
+    MIN_THINK_TIME,
+    draw_lognormal,
+    draw_session_lifetime,
+    draw_think_time,
+)
 
 # Add tracer linegraph to path for preview mode visualization
 #sys.path.insert(0, str(Path(__file__).parent.parent / "tracer" / "vision"))
@@ -175,16 +186,9 @@ def make_agent_filler_seeded(target_tokens: int, tokenizer, seed: int) -> str:
 
     return "".join(parts)
 
-# Minimum generation time threshold for TPS calculations.
-# Samples with shorter decode times are filtered as timing artifacts from network streaming.
-# Set to 50ms to cap realistic TPS at ~500 (assuming 5-12ms per token with acc_len=3)
-MIN_GENERATION_TIME = 0.05  # 50ms
-
-# Realistic mode constants
-MIN_THINK_TIME = 5.0  # Minimum think time floor in seconds
-MAX_THINK_TIME = 900.0  # Maximum think time cap in seconds (production p99 ~15min)
-MAX_INTER_ARRIVAL_TIME = 300.0  # Maximum inter-arrival time cap in seconds
-MAX_RETRIES = 3  # Max retries before abandoning a session
+# NOTE: constants moved to agent/sampling.py. Kept as one-line re-exports:
+# MIN_GENERATION_TIME, MIN_THINK_TIME, MAX_THINK_TIME, MAX_INTER_ARRIVAL_TIME,
+# MAX_RETRIES (already imported at top of file).
 QPS_TOLERANCE = 0.95  # Create new sessions when QPS drops below this fraction of target
 
 
@@ -232,76 +236,9 @@ class CachingTokenizer:
         return getattr(self.base_tokenizer, name)
 
 
-class KeyTap:
-    """Background thread to listen for keypresses during benchmark"""
-    
-    def __init__(self):
-        self.pending_new_sessions = 0  # Counter for queued new session requests
-        self.lock = threading.Lock()
-        self.running = False
-        self.thread = None
-        self.old_settings = None
-    
-    def start(self):
-        """Start listening for keypresses"""
-        self.running = True
-        self.thread = threading.Thread(target=self._listen, daemon=True)
-        self.thread.start()
-        print(f"{Colors.YELLOW}Press n to force next request to create a new session{Colors.END}")
-    
-    def stop(self):
-        """Stop listening"""
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=0.5)
-    
-    def _listen(self):
-        """Background thread that listens for keypresses"""
-        try:
-            # Save terminal settings
-            self.old_settings = termios.tcgetattr(sys.stdin)
-            # Set terminal to raw mode (no echo, immediate input)
-            tty.setcbreak(sys.stdin.fileno())
-            
-            while self.running:
-                # Check if input is available (non-blocking)
-                if select.select([sys.stdin], [], [], 0.1)[0]:
-                    char = sys.stdin.read(1)
-                    if char.lower() == 'n':
-                        with self.lock:
-                            self.pending_new_sessions += 1
-                        print(f"\n{Colors.YELLOW}>>> Queued additional new session request{Colors.END}")
-        except Exception:
-            pass  # Ignore errors (e.g., if not running in a terminal)
-        finally:
-            # Restore terminal settings
-            if self.old_settings:
-                try:
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
-                except (termios.error, OSError, AttributeError):
-                    # Best-effort tty restore; never block process exit.
-                    pass
-    
-    def get_pending_count(self) -> int:
-        """Get number of pending new session requests and reset counter"""
-        with self.lock:
-            count = self.pending_new_sessions
-            self.pending_new_sessions = 0
-            return count
-
-
-# Global keyboard listener instance
+# NOTE: KeyTap and Colors moved to agent/console.py — re-exported at top
+# of this file for back-compat with the rest of agent_throughput.py code.
 keyboard_listener = KeyTap()
-
-# Terminal colors
-class Colors:
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    END = "\033[0m"
 
 
 @dataclass
@@ -649,54 +586,8 @@ def make_shared_content(target_cacheable_tokens: int, system_prompt: str, tokeni
         return system_prompt + "\n\n" + padding
 
 
-def draw_lognormal(mean: float, median: float) -> int:
-    """Sample from lognormal distribution given mean and median."""
-    if median <= 0 or mean <= 0:
-        return max(1, int(mean))
-    mu = math.log(median)
-    if mean > median:
-        sigma = math.sqrt(2 * math.log(mean / median))
-    else:
-        # When mean <= median, use minimal sigma for low variance
-        # If mean and median are very close (within 0.1%), use sigma=0.01 for ~1% CV
-        # Otherwise use sigma=0.1 for backward compatibility
-        ratio = abs(mean - median) / mean if mean > 0 else 0
-        if ratio < 0.001:  # Within 0.1%
-            sigma = 0.01
-        else:
-            sigma = 0.1
-    return max(1, int(np.random.lognormal(mean=mu, sigma=sigma)))
-
-
-def draw_session_lifetime(mean: float, median: float) -> float:
-    """Sample session lifetime from lognormal distribution (returns seconds)."""
-    if median <= 0 or mean <= 0:
-        return max(60.0, mean)  # Default to at least 60 seconds
-    mu = math.log(median)
-    if mean > median:
-        sigma = math.sqrt(2 * math.log(mean / median))
-    else:
-        # When mean <= median, use minimal sigma for low variance
-        ratio = abs(mean - median) / mean if mean > 0 else 0
-        if ratio < 0.001:  # Within 0.1%
-            sigma = 0.01
-        else:
-            sigma = 0.1
-    return max(60.0, np.random.lognormal(mean=mu, sigma=sigma))
-
-
-def draw_think_time(mean: float, shape: float = 1.0) -> float:
-    """Sample think time from gamma distribution with min floor and max cap.
-
-    Uses gamma distribution parameterized to hit target mean:
-    - shape controls variance (higher = lower variance, 1.0 = exponential)
-    - scale = mean / shape (ensures gamma_mean = mean)
-    """
-    if mean <= 0:
-        return MIN_THINK_TIME
-    scale = mean / shape
-    sampled = np.random.gamma(shape=shape, scale=scale)
-    return min(MAX_THINK_TIME, max(MIN_THINK_TIME, sampled))
+# NOTE: draw_lognormal, draw_session_lifetime, draw_think_time moved to
+# agent/sampling.py — re-exported at top of this file.
 
 
 def draw_turn_plan(
