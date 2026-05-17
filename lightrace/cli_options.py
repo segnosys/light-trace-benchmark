@@ -58,9 +58,12 @@ def load_pattern_options(parser: ArgumentParser) -> None:
     grp.add_argument(
         "--traffic_pattern",
         type=str,
-        choices=["burst", "concurrent", "qps"],
+        choices=["burst", "open_loop_burst", "concurrent", "qps"],
         default="burst",
-        help="Three load patterns each simulates one possible serving scenario.",
+        help="Load pattern: 'burst' (closed-loop, waits for slowest), "
+             "'open_loop_burst' (true open-loop, fires on fixed cadence), "
+             "'concurrent' (N workers each running one-at-a-time), "
+             "'qps' (rate-based open-loop with arrival distribution).",
     )
     grp.add_argument(
         "--concurrency",

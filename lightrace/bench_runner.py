@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 from lightrace import REGISTERED_BACKENDS
 from lightrace.load_driver import (
     BatchedDriver,
+    OpenLoopBurstDriver,
     ParallelWorkerDriver,
     RateBasedDriver,
 )
@@ -51,6 +52,13 @@ class InferenceBenchRunner:
 
         if self.traffic_pattern == "burst":
             driver = BatchedDriver(
+                backend=backend_instance,
+                concurrency=int(level),
+                max_num_burst=max_num_burst,
+                burst_interval=burst_interval,
+            )
+        elif self.traffic_pattern == "open_loop_burst":
+            driver = OpenLoopBurstDriver(
                 backend=backend_instance,
                 concurrency=int(level),
                 max_num_burst=max_num_burst,

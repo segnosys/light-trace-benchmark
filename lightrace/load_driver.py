@@ -132,6 +132,16 @@ class ParallelWorkerDriver(LoadDriver):
 
 
 class BatchedDriver(LoadDriver):
+    """
+    Closed-loop bursts: fire N requests in parallel, wait for all to
+    complete, sleep until burst_interval, repeat.
+
+    The "burst" name in the original code was a misnomer — this is closed-loop
+    batched traffic, not true bursty arrivals. Per-batch wall time is bounded
+    by the SLOWEST request. For an open-loop burst pattern that doesn't wait
+    for stragglers, use OpenLoopBurstDriver below.
+    """
+
     def __init__(
         self,
         *,
@@ -176,3 +186,78 @@ class BatchedDriver(LoadDriver):
                 await asyncio.sleep(wait_time)
 
         return all_results, elapsed_times_per_batch
+
+
+class OpenLoopBurstDriver(LoadDriver):
+    """
+    True open-loop bursts: fire `concurrency` requests at every
+    `burst_interval` regardless of whether prior requests have finished.
+
+    Use this when you want to stress the server with arrivals that don't
+    back off when the server is slow — the classic "spike test" shape.
+
+    Difference vs BatchedDriver: BatchedDriver waits for the slowest
+    request in each batch before the next batch starts, so a slow tail
+    silently slows the whole sweep. OpenLoopBurstDriver guarantees the
+    next batch fires on schedule.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: BaseBackend,
+        concurrency: int,
+        max_num_burst: int = 10,
+        burst_interval: float = 0.5,
+    ) -> None:
+        super().__init__(backend=backend)
+        self.concurrency = concurrency
+        self.burst_interval = burst_interval
+        self.max_num_burst = max_num_burst
+
+    async def run_load(
+        self, requests: List[InferencePayload]
+    ) -> Tuple[List[ResultEntry], Optional[List[float]]]:
+        assert (
+            len(requests) >= self.concurrency
+        ), f"There's not enough prompts for batch {self.concurrency}"
+
+        in_flight: List[asyncio.Task] = []
+        # Per-burst wall-time = (this burst's fire time) - (prior burst's fire time).
+        # Useful for verifying burst cadence didn't drift under load.
+        fire_times: List[float] = []
+        run_start = time.perf_counter()
+
+        for batch_idx in range(len(requests) // self.concurrency):
+            if batch_idx >= self.max_num_burst:
+                break
+
+            t_fire = time.perf_counter()
+            fire_times.append(t_fire - run_start)
+
+            batch = requests[batch_idx * self.concurrency : (batch_idx + 1) * self.concurrency]
+            for req in batch:
+                in_flight.append(asyncio.create_task(self.execute_call(req)))
+
+            # Wait for the next scheduled fire time, NOT for the batch to finish.
+            # This is the open-loop part — bursts run on a fixed cadence.
+            if batch_idx + 1 < self.max_num_burst:
+                next_fire = run_start + (batch_idx + 1) * self.burst_interval
+                delay = next_fire - time.perf_counter()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+        # All bursts fired; drain anything still in flight.
+        all_results: List[ResultEntry] = list(await asyncio.gather(*in_flight))
+
+        # Convert absolute fire-times into per-burst intervals so analytics
+        # can compute Per-GPU throughput from real burst boundaries.
+        intervals: List[float] = []
+        for i in range(1, len(fire_times)):
+            intervals.append(fire_times[i] - fire_times[i - 1])
+        if fire_times:
+            # Final burst's "interval" extends to the end of the run so the
+            # last batch has a meaningful denominator.
+            intervals.append(time.perf_counter() - run_start - fire_times[-1])
+
+        return all_results, intervals
