@@ -12,7 +12,6 @@ Catches regressions in:
   - cache-token plumbing
   - LatencyProfile.ms_per_token, TTFT, etc.
 """
-import asyncio
 import json
 
 import pytest

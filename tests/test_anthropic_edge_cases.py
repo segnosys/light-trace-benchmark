@@ -5,10 +5,7 @@ backend smoke (test_anthropic_backend.py):
   - Extended TTL (1-hour cache) beta header
   - LIGHTRACE_ANTHROPIC_MIN_CACHEABLE override for the ideal-rate estimator
 """
-import os
-from unittest.mock import patch
 
-import pytest
 
 from lightrace.analytics import estimate_ideal_cache_hit_rate
 from lightrace.backends import AnthropicBackend

@@ -12,7 +12,6 @@ from aiohttp import web
 
 from lightrace.engine_metrics import (
     EngineMetricsPoller,
-    METRIC_NAMES,
     parse_prometheus_text,
 )
 

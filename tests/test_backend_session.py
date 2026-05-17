@@ -10,7 +10,6 @@ it explicitly from the runner.
 import asyncio
 
 import aiohttp
-import pytest
 
 from lightrace.backends import OpenAIBackend, SGLangBackend
 
