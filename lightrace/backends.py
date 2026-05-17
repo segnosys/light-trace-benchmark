@@ -170,6 +170,11 @@ class BaseBackend(abc.ABC):
                 # Prompt-cache accounting from backend usage objects.
                 cached_input_tokens = None
                 cache_creation_input_tokens = None
+                # Sticky across chunks — only set when a fragment carries it.
+                # Anthropic reports prompt_tokens in message_start only; text
+                # deltas in between have prompt_usage_tokens=None and must
+                # not overwrite the real value.
+                prompt_usage_tokens = 0
                 raw_chunks = []
 
                 async for chunk_bytes in response.content:
@@ -209,8 +214,6 @@ class BaseBackend(abc.ABC):
 
                     if fragment.prompt_usage_tokens:
                         prompt_usage_tokens = fragment.prompt_usage_tokens
-                    else:
-                        prompt_usage_tokens = 0
 
                     # capture acceptance rate from chunk metadata if available
                     if fragment.accept_ratio is not None:
