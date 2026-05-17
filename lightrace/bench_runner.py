@@ -71,4 +71,10 @@ class InferenceBenchRunner:
         else:
             raise ValueError(f"Unsupported traffic pattern: {self.traffic_pattern}.")
 
-        return await driver.run_load(requests)
+        try:
+            return await driver.run_load(requests)
+        finally:
+            # Close the shared aiohttp session opened by the backend.
+            # Without this we leak the connector and emit a noisy
+            # "Unclosed client session" warning at interpreter shutdown.
+            await backend_instance.close()

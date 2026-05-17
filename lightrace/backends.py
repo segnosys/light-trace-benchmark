@@ -61,6 +61,43 @@ class BaseBackend(abc.ABC):
         else:
             self.tokenizer_name = model_name
 
+        # Shared session — lazy-created on first request, reused for every
+        # subsequent call. Replaces the prior per-request ClientSession that
+        # paid TCP+TLS handshake on every benchmark request. The connector
+        # cap allows enough concurrent sockets for our typical concurrency
+        # range (up to 256) and `force_close=False` keeps keep-alive on.
+        self._session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Return the shared ClientSession, creating it on first use."""
+        if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(
+                limit=256,        # max concurrent connections across the pool
+                limit_per_host=256,  # all of ours hit one host
+                force_close=False,
+                enable_cleanup_closed=True,
+            )
+            self._session = aiohttp.ClientSession(
+                headers=self.build_headers(),
+                timeout=HTTP_SESSION_TIMEOUT,
+                read_bufsize=HTTP_READ_BUFFER,
+                connector=connector,
+            )
+        return self._session
+
+    async def close(self) -> None:
+        """Close the shared session. Safe to call multiple times.
+
+        Always clears the reference, even when the underlying session was
+        already closed externally — keeps `_get_session()` semantics simple
+        (None == no live session, recreate on next request).
+        """
+        try:
+            if self._session is not None and not self._session.closed:
+                await self._session.close()
+        finally:
+            self._session = None
+
     @abc.abstractmethod
     def build_endpoint_url(self, request: InferencePayload) -> str:
         pass
@@ -103,219 +140,215 @@ class BaseBackend(abc.ABC):
 
         payload = self.build_request_body(request)
         logging.debug(payload)
-        async with aiohttp.ClientSession(
-            headers=self.build_headers(),
-            timeout=HTTP_SESSION_TIMEOUT,
-            read_bufsize=HTTP_READ_BUFFER,
-        ) as session:
-            failed_result = ResultEntry(success=False)
-            t_start = time.perf_counter()
+        session = await self._get_session()
+        failed_result = ResultEntry(success=False)
+        t_start = time.perf_counter()
 
-            try:
-                async with session.post(self.build_endpoint_url(request), json=payload) as response:
-                    if response.status != 200:
-                        error_bytes = b""
-                        async for chunk_bytes in response.content:
-                            error_bytes += chunk_bytes
-                        error_text = error_bytes.decode("utf-8")
-                        failed_result.content = error_text
+        try:
+            async with session.post(self.build_endpoint_url(request), json=payload) as response:
+                if response.status != 200:
+                    error_bytes = b""
+                    async for chunk_bytes in response.content:
+                        error_bytes += chunk_bytes
+                    error_text = error_bytes.decode("utf-8")
+                    failed_result.content = error_text
 
-                        trace_id = extract_trace_id_from_headers(response.headers)
-                        logging.warning(
-                            f"Request failed with status {response.status}, "
-                            f"request-id: {trace_id}"
-                        )
-                        logging.warning(error_text)
+                    trace_id = extract_trace_id_from_headers(response.headers)
+                    logging.warning(
+                        f"Request failed with status {response.status}, "
+                        f"request-id: {trace_id}"
+                    )
+                    logging.warning(error_text)
+                    return failed_result
+
+                accumulated_text = ""
+                finished = False
+                total_usage_tokens = None
+                total_logprob_tokens = None
+                t_first_token = None
+                accept_ratio = None
+                # Prompt-cache accounting from backend usage objects.
+                cached_input_tokens = None
+                cache_creation_input_tokens = None
+                raw_chunks = []
+
+                async for chunk_bytes in response.content:
+                    chunk_bytes = chunk_bytes.strip()
+
+                    if not chunk_bytes:
+                        continue
+
+                    line = chunk_bytes.decode("utf-8")
+                    raw_chunks.append(line)
+
+                    if finished:
+                        if "[DONE]" not in line:
+                            print(f"WARNING: Received more chunks after [DONE]: {line}")
+                        continue
+                    now = time.perf_counter()
+
+                    # stream mode
+                    if request.stream:
+                        if not line.startswith("data:"):
+                            continue
+                        line = line[len("data:"):]
+                        if line.strip() == "[DONE]":
+                            finished = True
+                            continue
+
+                    data = orjson.loads(line)
+
+                    # parse output
+                    fragment = self.decode_response_chunk(data=data, request=request)
+
+                    if fragment is None:
                         return failed_result
 
-                    accumulated_text = ""
-                    finished = False
-                    total_usage_tokens = None
-                    total_logprob_tokens = None
-                    t_first_token = None
-                    accept_ratio = None
-                    # Prompt-cache accounting from backend usage objects.
-                    cached_input_tokens = None
-                    cache_creation_input_tokens = None
-                    raw_chunks = []
+                    if fragment.usage_tokens:
+                        total_usage_tokens = max(total_usage_tokens or 0, fragment.usage_tokens)
 
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
+                    if fragment.prompt_usage_tokens:
+                        prompt_usage_tokens = fragment.prompt_usage_tokens
+                    else:
+                        prompt_usage_tokens = 0
 
-                        if not chunk_bytes:
-                            continue
+                    # capture acceptance rate from chunk metadata if available
+                    if fragment.accept_ratio is not None:
+                        accept_ratio = fragment.accept_ratio
 
-                        line = chunk_bytes.decode("utf-8")
-                        raw_chunks.append(line)
+                    # capture prompt-cache info — usage chunks typically appear
+                    # at end of stream, so we take the last non-None value.
+                    if fragment.cached_input_tokens is not None:
+                        cached_input_tokens = fragment.cached_input_tokens
+                    if fragment.cache_creation_input_tokens is not None:
+                        cache_creation_input_tokens = fragment.cache_creation_input_tokens
 
-                        if finished:
-                            if "[DONE]" not in line:
-                                print(f"WARNING: Received more chunks after [DONE]: {line}")
-                            continue
-                        now = time.perf_counter()
+                    if fragment.text is None:
+                        continue
 
-                        # stream mode
-                        if request.stream:
-                            if not line.startswith("data:"):
-                                continue
-                            line = line[len("data:"):]
-                            if line.strip() == "[DONE]":
-                                finished = True
-                                continue
+                    # update accumulated text
+                    accumulated_text += fragment.text
 
-                        data = orjson.loads(line)
-
-                        # parse output
-                        fragment = self.decode_response_chunk(data=data, request=request)
-
-                        if fragment is None:
-                            return failed_result
-
-                        if fragment.usage_tokens:
-                            total_usage_tokens = max(total_usage_tokens or 0, fragment.usage_tokens)
-
-                        if fragment.prompt_usage_tokens:
-                            prompt_usage_tokens = fragment.prompt_usage_tokens
-                        else:
-                            prompt_usage_tokens = 0
-
-                        # capture acceptance rate from chunk metadata if available
-                        if fragment.accept_ratio is not None:
-                            accept_ratio = fragment.accept_ratio
-
-                        # capture prompt-cache info — usage chunks typically appear
-                        # at end of stream, so we take the last non-None value.
-                        if fragment.cached_input_tokens is not None:
-                            cached_input_tokens = fragment.cached_input_tokens
-                        if fragment.cache_creation_input_tokens is not None:
-                            cache_creation_input_tokens = fragment.cache_creation_input_tokens
-
-                        if fragment.text is None:
-                            continue
-
-                        # update accumulated text
-                        accumulated_text += fragment.text
-
-                        # some backends send an empty chunk first skewing the TTFT
-                        if accumulated_text and t_first_token is None:
-                            t_first_token = now
-
-                        # update logprob tokens
-                        if fragment.logprob_tokens:
-                            total_logprob_tokens = (total_logprob_tokens or 0) + fragment.logprob_tokens
-
-                    # get latency metrics
-                    now = time.perf_counter()
-                    dur_total = now - t_start
-
-                    if t_first_token is None and not accumulated_text:
+                    # some backends send an empty chunk first skewing the TTFT
+                    if accumulated_text and t_first_token is None:
                         t_first_token = now
 
-                    # get num tokens
-                    if self.force_recounting_completions:
+                    # update logprob tokens
+                    if fragment.logprob_tokens:
+                        total_logprob_tokens = (total_logprob_tokens or 0) + fragment.logprob_tokens
+
+                # get latency metrics
+                now = time.perf_counter()
+                dur_total = now - t_start
+
+                if t_first_token is None and not accumulated_text:
+                    t_first_token = now
+
+                # get num tokens
+                if self.force_recounting_completions:
+                    output_tokens = self.count_text_tokens(accumulated_text)
+                else:
+                    if total_logprob_tokens is not None:
+                        output_tokens = total_logprob_tokens
+                    else:
+                        output_tokens = total_usage_tokens
+
+                    if output_tokens is None:
                         output_tokens = self.count_text_tokens(accumulated_text)
-                    else:
-                        if total_logprob_tokens is not None:
-                            output_tokens = total_logprob_tokens
-                        else:
-                            output_tokens = total_usage_tokens
 
-                        if output_tokens is None:
-                            output_tokens = self.count_text_tokens(accumulated_text)
+                output_chars = len(accumulated_text)
 
-                    output_chars = len(accumulated_text)
+                if request.stream:
+                    dur_generation = now - t_first_token
+                else:
+                    dur_generation = dur_total
 
-                    if request.stream:
-                        dur_generation = now - t_first_token
-                    else:
-                        dur_generation = dur_total
+                dur_first_token = t_first_token - t_start
 
-                    dur_first_token = t_first_token - t_start
+                if output_tokens > 0 and dur_generation > 0:
+                    tps = output_tokens / dur_generation
+                else:
+                    tps = 0.0
 
-                    if output_tokens > 0 and dur_generation > 0:
-                        tps = output_tokens / dur_generation
-                    else:
-                        tps = 0.0
-
-                    logging.debug(
-                        f"Response received: total {(dur_total * 1000):.2f} ms, "
-                        f"first token {(dur_first_token * 1000):.2f} ms, "
-                        f"{output_chars} chars, {output_tokens} tokens, "
-                        f"{tps:.2f} tokens/s"
-                    )
-
-                    # init metrics
-                    metrics = LatencyProfile()
-
-                    # latency per char
-                    if output_chars and dur_generation > 0:
-                        metrics.ms_per_char = dur_generation / output_chars * 1000
-                        metrics.char_throughput = 1000 / metrics.ms_per_char
-                        metrics.output_char_count = output_chars
-
-                    # time to first token
-                    if request.stream:
-                        metrics.first_token_latency = dur_first_token * 1000
-                    else:
-                        metrics.first_token_latency = dur_total * 1000
-
-                    # total latency
-                    metrics.end_to_end_ms = dur_total * 1000
-
-                    # ms latency per token and tokens per second
-                    if output_tokens and output_tokens > 0:
-                        metrics.output_token_count = output_tokens
-                        if request.stream and dur_generation > 0:
-                            metrics.ms_per_token = dur_generation / output_tokens * 1000
-                        elif not request.stream and dur_total > 0:
-                            metrics.ms_per_token = dur_total / output_tokens * 1000
-
-                        if hasattr(metrics, "ms_per_token") and metrics.ms_per_token > 0:
-                            metrics.token_throughput = 1000 / metrics.ms_per_token
-
-                    # get prompt tokens
-                    if not prompt_usage_tokens:
-                        metrics.input_token_count = self.count_prompt_tokens(request)
-                    else:
-                        metrics.input_token_count = prompt_usage_tokens
-
-                    # set acceptance rate if available
-                    if accept_ratio is not None:
-                        metrics.accept_ratio = accept_ratio
-
-                    # set cache stats if backend reported them
-                    if cached_input_tokens is not None:
-                        metrics.cached_input_tokens = cached_input_tokens
-                    if cache_creation_input_tokens is not None:
-                        metrics.cache_creation_input_tokens = cache_creation_input_tokens
-
-                    # post-validation
-                    self.after_request(request, metrics)
-
-                    return ResultEntry(
-                        model=self.model_name,
-                        request=request,
-                        content=accumulated_text,
-                        metrics=metrics,
-                        success=True,
-                    )
-
-            except Exception as e:
-                trace_id = "N/A"
-                try:
-                    if "response" in locals():
-                        trace_id = extract_trace_id_from_headers(response.headers)
-                except (AttributeError, KeyError, TypeError, NameError):
-                    # Best-effort trace-id lookup for logging context only;
-                    # never let it mask the original exception we're handling.
-                    pass
-
-                logging.warning(
-                    f"Request failed with exception (request-id: {trace_id}): {e}",
-                    exc_info=True,
+                logging.debug(
+                    f"Response received: total {(dur_total * 1000):.2f} ms, "
+                    f"first token {(dur_first_token * 1000):.2f} ms, "
+                    f"{output_chars} chars, {output_tokens} tokens, "
+                    f"{tps:.2f} tokens/s"
                 )
-                failed_result.content = str(e)
-                return failed_result
+
+                # init metrics
+                metrics = LatencyProfile()
+
+                # latency per char
+                if output_chars and dur_generation > 0:
+                    metrics.ms_per_char = dur_generation / output_chars * 1000
+                    metrics.char_throughput = 1000 / metrics.ms_per_char
+                    metrics.output_char_count = output_chars
+
+                # time to first token
+                if request.stream:
+                    metrics.first_token_latency = dur_first_token * 1000
+                else:
+                    metrics.first_token_latency = dur_total * 1000
+
+                # total latency
+                metrics.end_to_end_ms = dur_total * 1000
+
+                # ms latency per token and tokens per second
+                if output_tokens and output_tokens > 0:
+                    metrics.output_token_count = output_tokens
+                    if request.stream and dur_generation > 0:
+                        metrics.ms_per_token = dur_generation / output_tokens * 1000
+                    elif not request.stream and dur_total > 0:
+                        metrics.ms_per_token = dur_total / output_tokens * 1000
+
+                    if hasattr(metrics, "ms_per_token") and metrics.ms_per_token > 0:
+                        metrics.token_throughput = 1000 / metrics.ms_per_token
+
+                # get prompt tokens
+                if not prompt_usage_tokens:
+                    metrics.input_token_count = self.count_prompt_tokens(request)
+                else:
+                    metrics.input_token_count = prompt_usage_tokens
+
+                # set acceptance rate if available
+                if accept_ratio is not None:
+                    metrics.accept_ratio = accept_ratio
+
+                # set cache stats if backend reported them
+                if cached_input_tokens is not None:
+                    metrics.cached_input_tokens = cached_input_tokens
+                if cache_creation_input_tokens is not None:
+                    metrics.cache_creation_input_tokens = cache_creation_input_tokens
+
+                # post-validation
+                self.after_request(request, metrics)
+
+                return ResultEntry(
+                    model=self.model_name,
+                    request=request,
+                    content=accumulated_text,
+                    metrics=metrics,
+                    success=True,
+                )
+
+        except Exception as e:
+            trace_id = "N/A"
+            try:
+                if "response" in locals():
+                    trace_id = extract_trace_id_from_headers(response.headers)
+            except (AttributeError, KeyError, TypeError, NameError):
+                # Best-effort trace-id lookup for logging context only;
+                # never let it mask the original exception we're handling.
+                pass
+
+            logging.warning(
+                f"Request failed with exception (request-id: {trace_id}): {e}",
+                exc_info=True,
+            )
+            failed_result.content = str(e)
+            return failed_result
 
 
 class OpenAIBackend(BaseBackend):
