@@ -454,6 +454,23 @@ def output_options(parser: ArgumentParser) -> None:
         ),
     )
     grp.add_argument(
+        "--engine_metrics_url",
+        type=str,
+        default=None,
+        help=(
+            "Optional Prometheus /metrics URL to poll alongside the run "
+            "(e.g. http://localhost:30100/metrics for sglang). Server-reported "
+            "queue depth / batch size / KV usage are summarized into the report "
+            "so you can cross-check client-observed TPOT."
+        ),
+    )
+    grp.add_argument(
+        "--engine_metrics_interval_s",
+        type=float,
+        default=1.0,
+        help="Polling cadence for --engine_metrics_url (default: 1.0 second).",
+    )
+    grp.add_argument(
         "--pulsar_log_path",
         type=str,
         default=None,

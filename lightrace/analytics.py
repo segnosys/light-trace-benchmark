@@ -258,6 +258,7 @@ def summarize_benchmark(
     engine_log_path: Optional[str] = None,
     accept_rate_pattern: Optional[str] = None,
     ideal_cache_hit_rate: Optional[float] = None,
+    engine_metrics: Optional[Dict] = None,
 ) -> BenchmarkReport:
     success_results = [result for result in results if result.success]
 
@@ -344,6 +345,7 @@ def summarize_benchmark(
         cache_hit_rate=_extract_cache_hit_rate(success_results, histogram_metrics),
         total_cached_input_tokens=_sum_cached_input_tokens(success_results),
         ideal_cache_hit_rate=ideal_cache_hit_rate,
+        engine_metrics=engine_metrics,
     )
 
 
@@ -468,6 +470,33 @@ def render_report(report: BenchmarkReport) -> None:
             colalign=("left", "right"),
         )
     )
+
+    # Optional server-side metrics block — only shown when --engine_metrics_url
+    # was set AND at least one sample came back from the endpoint.
+    if report.engine_metrics:
+        rows = []
+        for name, s in sorted(report.engine_metrics.items()):
+            mean = s.get("mean")
+            mx = s.get("max")
+            latest = s.get("latest")
+            samples = int(s.get("samples") or 0)
+            rows.append([
+                name,
+                f"{mean:.2f}" if mean is not None else "n/a",
+                f"{mx:.2f}" if mx is not None else "n/a",
+                f"{latest:.2f}" if latest is not None else "n/a",
+                samples,
+            ])
+        if rows:
+            print()
+            print("Server-side metrics (Prometheus /metrics):")
+            print(
+                tabulate(
+                    rows,
+                    headers=["metric", "mean", "max", "latest", "samples"],
+                    colalign=("left", "right", "right", "right", "right"),
+                )
+            )
 
 
 def export_report_csv(
