@@ -682,6 +682,14 @@ class AnthropicBackend(BaseBackend):
 
     ANTHROPIC_API_VERSION = "2023-06-01"
 
+    # Sonnet/Haiku cacheable minimum is 1024 tokens; Opus needs 2048.
+    # The 1h beta TTL header is "anthropic-beta: prompt-caching-2024-07-31".
+    MIN_CACHEABLE_TOKENS_DEFAULT = 1024
+    MIN_CACHEABLE_TOKENS_OPUS = 2048
+    EXTENDED_TTL_BETA_HEADER = "prompt-caching-2024-07-31"
+    # Maximum cache_control breakpoints the API accepts per request.
+    MAX_CACHE_BREAKPOINTS = 4
+
     def __init__(
         self,
         base_url: str,
@@ -690,6 +698,7 @@ class AnthropicBackend(BaseBackend):
         tokenizer_name: Optional[str] = None,
         force_recounting_completions: bool = False,
         enable_prompt_caching: bool = True,
+        enable_extended_cache_ttl: bool = False,
     ):
         if not api_key:
             api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -703,6 +712,8 @@ class AnthropicBackend(BaseBackend):
         # When True, mark long content blocks with cache_control so the
         # Messages API populates cache_read_input_tokens on repeat hits.
         self.enable_prompt_caching = enable_prompt_caching
+        # Opt-in: 1-hour cache TTL (vs default 5 min). Adds the beta header.
+        self.enable_extended_cache_ttl = enable_extended_cache_ttl
 
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -712,15 +723,28 @@ class AnthropicBackend(BaseBackend):
             self.tokenizer = None
             logging.warning(f"AnthropicBackend tokenizer load skipped: {e}")
 
+    @property
+    def min_cacheable_tokens(self) -> int:
+        """Per-block minimum size below which Anthropic ignores cache_control."""
+        # Opus models need 2048; everything else 1024. Match on the substring
+        # in case the user passed a versioned name like "claude-3-opus-20240229".
+        if self.model_name and "opus" in self.model_name.lower():
+            return self.MIN_CACHEABLE_TOKENS_OPUS
+        return self.MIN_CACHEABLE_TOKENS_DEFAULT
+
     def build_endpoint_url(self, request: InferencePayload) -> str:
         return os.path.join(self.base_url.rstrip("/"), "v1/messages")
 
     def build_headers(self) -> Dict:
-        return {
+        headers = {
             "x-api-key": self.api_key,
             "anthropic-version": self.ANTHROPIC_API_VERSION,
             "Content-Type": "application/json",
         }
+        if self.enable_extended_cache_ttl:
+            # Opt into 1-hour cache TTL (default is 5 minutes).
+            headers["anthropic-beta"] = self.EXTENDED_TTL_BETA_HEADER
+        return headers
 
     def count_prompt_tokens(self, request: InferencePayload) -> int:
         if not self.tokenizer:

@@ -177,8 +177,16 @@ def estimate_ideal_cache_hit_rate(
 
     Returns None when the shape doesn't admit a clean estimate.
     """
-    # Anthropic Sonnet/Haiku won't cache chunks below this; Opus is 2048.
-    anthropic_min_cacheable = 1024 if provider == "anthropic" else 0
+    # Anthropic Sonnet/Haiku won't cache chunks below 1024 tokens; Opus is 2048.
+    # The estimator can't peek at model_name from this signature, so default to
+    # 1024. Callers wanting the Opus threshold can override via the env var
+    # LIGHTRACE_ANTHROPIC_MIN_CACHEABLE — kept as escape hatch rather than yet
+    # another argument; the Opus-aware logic lives on AnthropicBackend itself.
+    import os as _os
+    anthropic_min_cacheable = (
+        int(_os.environ.get("LIGHTRACE_ANTHROPIC_MIN_CACHEABLE", 1024))
+        if provider == "anthropic" else 0
+    )
 
     # Case 1: identical prompts repeated -> trivially cacheable
     if same_prompts_in_burst:
