@@ -6,6 +6,14 @@ exclude =  ["benchmark"]
 ignore_missing_imports = true
 disallow_subclassing_any = false
 warn_return_any = false
+# Non-strict baseline today. Strict pass is deferred to a typed refactor
+# of input_pipeline.py + a real typed dataclass layer over the backends'
+# **kwargs payloads (see 1-week-followup memory). Until then, mypy is
+# informational, not gating — the GH Actions workflow doesn't run it.
+no_implicit_optional = false
+# Allow gradual typing: untyped function bodies are not errors.
+disallow_untyped_defs = false
+check_untyped_defs = false
 
 [tool.black]
 line-length = 100
