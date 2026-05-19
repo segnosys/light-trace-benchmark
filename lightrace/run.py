@@ -33,6 +33,7 @@ from lightrace.analytics import (
     render_report,
     summarize_benchmark,
 )
+from lightrace.engine_metrics import EngineMetricsPoller
 from lightrace.experiment_tracker import (
     ExperimentTracker,
     capture_invocation,
@@ -296,15 +297,31 @@ def main(argv: List[str] | None = None):
         loaded_requests = pipeline.prepare_inputs()
 
         start_time = time.perf_counter()
-        results, per_batch_elapsed_times = asyncio.run(
-            runner.run_benchmark(
-                requests=loaded_requests,
-                level=level,
-                max_num_burst=args.max_num_burst,
-                burst_interval=args.burst_interval,
-                qps_distribution=args.qps_distribution,
-                qps_duration_s=args.duration,
-            )
+
+        async def _run_with_optional_metrics_poller():
+            poller = None
+            if args.engine_metrics_url:
+                poller = EngineMetricsPoller(
+                    args.engine_metrics_url,
+                    interval_s=args.engine_metrics_interval_s,
+                )
+                await poller.start()
+            try:
+                bench_out = await runner.run_benchmark(
+                    requests=loaded_requests,
+                    level=level,
+                    max_num_burst=args.max_num_burst,
+                    burst_interval=args.burst_interval,
+                    qps_distribution=args.qps_distribution,
+                    qps_duration_s=args.duration,
+                )
+            finally:
+                if poller is not None:
+                    await poller.stop()
+            return bench_out, (poller.snapshot() if poller else None)
+
+        (results, per_batch_elapsed_times), engine_snapshot = asyncio.run(
+            _run_with_optional_metrics_poller()
         )
         total_elapse_time_s = time.perf_counter() - start_time
 
@@ -345,6 +362,7 @@ def main(argv: List[str] | None = None):
             engine_log_path=engine_log_path,
             accept_rate_pattern=accept_rate_pattern,
             ideal_cache_hit_rate=ideal_cache,
+            engine_metrics=engine_snapshot,
         )
         render_report(report)
 

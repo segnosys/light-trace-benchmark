@@ -256,6 +256,49 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
     # Store data directory for rescanning
     app.data_dir = data_dir
 
+    # Flask route on the underlying app.server for CSV export. URL:
+    #   /export/<bench_id>.csv?fields=elapsed_seconds,generation_tps[,...]
+    # bench_id is `<name>/<timestamp>` URL-encoded (forward slash OK in flask
+    # path with <path:bench_id>). Default field set = the most-asked metrics.
+    DEFAULT_EXPORT_FIELDS = [
+        "elapsed_seconds", "prefill_tps", "generation_tps",
+        "cache_hit_rate", "in_flight", "requests_completed", "errors",
+    ]
+
+    @app.server.route("/export/<path:bench_id>.csv")
+    def export_csv(bench_id):
+        from flask import abort, Response, request as flask_request
+
+        # Fresh scan so the route works even before the user opens the UI.
+        traces = scan_benchmarks(app.data_dir)
+        if bench_id not in traces:
+            abort(404, description=f"benchmark not found: {bench_id}")
+
+        # Optional ?fields= filter; whitelist against MetricPoint dataclass
+        # fields to prevent attribute traversal abuse.
+        from dataclasses import fields as _fields
+        allowed = {f.name for f in _fields(MetricPoint)}
+        requested = (
+            flask_request.args.get("fields", "").split(",")
+            if flask_request.args.get("fields") else DEFAULT_EXPORT_FIELDS
+        )
+        cols = [c for c in requested if c in allowed] or DEFAULT_EXPORT_FIELDS
+
+        points, _ = load_metrics(traces[bench_id].file_path)
+        # CSV emit (no quoting needed — all values are numeric or short ints)
+        rows = [",".join(cols)]
+        for p in points:
+            rows.append(",".join(str(getattr(p, c, "")) for c in cols))
+        body = "\n".join(rows) + "\n"
+        safe_filename = bench_id.replace("/", "__")
+        return Response(
+            body,
+            mimetype="text/csv",
+            headers={
+                "Content-Disposition": f'attachment; filename="{safe_filename}.csv"',
+            },
+        )
+
     # Custom CSS styling
     app.index_string = '''<!DOCTYPE html>
 <html>

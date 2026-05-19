@@ -201,3 +201,6 @@ class BenchmarkReport:
     # gsp_cached_fraction, etc.). Compare against cache_hit_rate.mean to spot
     # broken or absent cache reporting on the server side.
     ideal_cache_hit_rate: Optional[float] = None
+    # Server-side metrics scraped from the inference server's /metrics endpoint
+    # (when --engine_metrics_url is set). Maps metric name -> {mean, max, latest, samples}.
+    engine_metrics: Optional[dict] = None

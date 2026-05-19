@@ -58,9 +58,12 @@ def load_pattern_options(parser: ArgumentParser) -> None:
     grp.add_argument(
         "--traffic_pattern",
         type=str,
-        choices=["burst", "concurrent", "qps"],
+        choices=["burst", "open_loop_burst", "concurrent", "qps"],
         default="burst",
-        help="Three load patterns each simulates one possible serving scenario.",
+        help="Load pattern: 'burst' (closed-loop, waits for slowest), "
+             "'open_loop_burst' (true open-loop, fires on fixed cadence), "
+             "'concurrent' (N workers each running one-at-a-time), "
+             "'qps' (rate-based open-loop with arrival distribution).",
     )
     grp.add_argument(
         "--concurrency",
@@ -449,6 +452,23 @@ def output_options(parser: ArgumentParser) -> None:
             "This argument works with all backends (tgi, sglang, vllm, etc.) and "
             "internally resolves to the appropriate log processing based on --provider."
         ),
+    )
+    grp.add_argument(
+        "--engine_metrics_url",
+        type=str,
+        default=None,
+        help=(
+            "Optional Prometheus /metrics URL to poll alongside the run "
+            "(e.g. http://localhost:30100/metrics for sglang). Server-reported "
+            "queue depth / batch size / KV usage are summarized into the report "
+            "so you can cross-check client-observed TPOT."
+        ),
+    )
+    grp.add_argument(
+        "--engine_metrics_interval_s",
+        type=float,
+        default=1.0,
+        help="Polling cadence for --engine_metrics_url (default: 1.0 second).",
     )
     grp.add_argument(
         "--pulsar_log_path",
