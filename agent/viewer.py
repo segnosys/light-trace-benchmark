@@ -3,15 +3,20 @@
 Live dashboard for simulation benchmark visualization
 """
 
-import json
 import argparse
 import statistics
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
-from typing import List, Dict, Optional
 from dash import Dash, html, dcc, callback, Input, Output
 import plotly.graph_objects as go
+
+# Data-layer types and loaders live in their own module so unit tests can
+# exercise them without depending on the Dash/Plotly extras.
+from agent.viewer_data import (
+    MetricPoint,
+    load_metrics,
+    scan_benchmarks,
+)
 
 
 # Module-level so closures don't capture loop-local rebindings (B023). 10 colors
@@ -38,92 +43,17 @@ def session_style(idx: int):
     return color, shape
 
 
-@dataclass
-class MetricPoint:
-    """Single data point from metrics.jsonl"""
-    timestamp: float
-    elapsed_seconds: float
-    prefill_tps: float = 0  # Prefill tokens/sec (1s window)
-    prefill_tps_window: float = 0  # Prefill tokens/sec (configurable window)
-    prefill_tpm_per_gpu: float = 0  # Prefill TPM per GPU
-    generation_tps: float = 0  # Generation TPS (MTP compensated)
-    cache_hit_rate: float = 0  # Cache hit rate (0-1)
-    ideal_cache_hit_rate: float = 0  # Ideal cache hit rate (assuming no eviction)
-    requests_completed: int = 0
-    requests_sent: int = 0
-    errors: int = 0
-    in_flight: int = 0
-    num_sessions_active: int = 0
-    num_sessions_retired: int = 0
-    num_sessions_abandoned: int = 0
-    num_sessions_total: int = 0
-    sessions_created_by_rate: int = 0
-    sessions_abandoned_by_rate: int = 0
-    gpus: int = 1
-    window_size: float = 15.0
-    new_session_times: List[float] = None  # Timestamps of natural new session requests
-    forced_session_times: List[float] = None  # Timestamps of forced new session requests (via keypress)
-    existing_session_requests: List = None  # [[time, session_id], ...] for coloring by session
-    new_planned_prompt_lengths: List[int] = None  # New planned prompt lengths this interval (SEND order)
-    new_planned_ideal_cache_hit_rates: List[float] = None  # New planned ideal cache hit rates (SEND order)
-    new_prompt_lengths: List[int] = None  # New prompt lengths this interval (COMPLETION order)
-    new_generation_lengths: List[int] = None  # New generation lengths this interval
-    new_cache_hit_rates: List[float] = None  # New per-request cache hit rates this interval
-    new_ideal_cache_hit_rates: List[float] = None  # New ideal cache hit rates this interval
-    new_inter_arrival_times: List[float] = None  # New inter-arrival times this interval
-    new_ttfts: List[float] = None  # New TTFT values this interval (seconds)
-    new_acceptance_lengths: List[float] = None  # New per-request acceptance lengths
-    new_acceptance_rates: List[float] = None  # New per-request acceptance rates
+# NOTE: MetricPoint, BenchmarkTrace, load_metrics, scan_benchmarks,
+# load_metadata, load_log_analysis moved to agent/viewer_data.py and
+# re-imported at the top of this file. Keeping them out of viewer.py
+# means tests for the loaders don't need to importorskip('dash').
 
-
-@dataclass
-class BenchmarkTrace:
-    """Data for one line on the graph"""
-    label: str              # e.g., "my-test"
-    benchmark_name: str     # e.g., "my-test/2025-01-19-14-23-45"
-    metrics: List[MetricPoint]
-    file_path: Path
-    last_position: int = 0  # For incremental reading
-    all_new_session_times: List[float] = None  # Accumulated natural new session timestamps
-    all_forced_session_times: List[float] = None  # Accumulated forced session timestamps
-    all_existing_session_requests: List = None  # Accumulated [[time, session_id], ...]
-    all_planned_prompt_lengths: List[int] = None  # Accumulated planned prompt lengths (SEND order)
-    all_planned_ideal_cache_hit_rates: List[float] = None  # Accumulated planned ideal cache hit rates (SEND order)
-    all_prompt_lengths: List[int] = None  # Accumulated prompt lengths (COMPLETION order)
-    all_generation_lengths: List[int] = None  # Accumulated generation lengths
-    all_cache_hit_rates: List[float] = None  # Accumulated per-request cache hit rates
-    all_ideal_cache_hit_rates: List[float] = None  # Accumulated ideal cache hit rates
-    all_inter_arrival_times: List[float] = None  # Accumulated inter-arrival times
-    metadata: Dict = None  # Config from metadata.json
-    log_analysis: Dict = None  # Log analysis data from log_analysis.json
-
-
-def load_metadata(benchmark_dir: Path) -> Dict:
-    """Load metadata.json from benchmark directory"""
-    metadata_file = benchmark_dir / "metadata.json"
-    if metadata_file.exists():
-        try:
-            with open(metadata_file, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
-
-
-def load_log_analysis(benchmark_dir: Path) -> Optional[Dict]:
-    """Load log_analysis.json from benchmark directory if it exists"""
-    analysis_file = benchmark_dir / "log_analysis.json"
-    if analysis_file.exists():
-        try:
-            with open(analysis_file, 'r') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return None
+# Tiny presentation helpers — kept inline because they're only used by the
+# UI rendering callbacks below, not by the data layer.
 
 
 def format_num(val, decimals=1):
-    """Format large numbers with K/M suffix"""
+    """Format large numbers with K/M suffix for the dashboard chips."""
     if val >= 1_000_000:
         return f"{val/1_000_000:.{decimals}f}M"
     elif val >= 1_000:
@@ -133,7 +63,7 @@ def format_num(val, decimals=1):
 
 
 def percentile(data, p):
-    """Calculate percentile of data"""
+    """Linear-interpolation percentile (small-list-friendly, no numpy)."""
     if not data:
         return 0
     sorted_data = sorted(data)
@@ -141,109 +71,6 @@ def percentile(data, p):
     f = int(k)
     c = f + 1 if f + 1 < len(sorted_data) else f
     return sorted_data[f] + (sorted_data[c] - sorted_data[f]) * (k - f)
-
-
-def load_metrics(metrics_file: Path, start_position: int = 0) -> tuple[List[MetricPoint], int]:
-    """Parse metrics.jsonl file incrementally"""
-    metrics = []
-
-    if not metrics_file.exists():
-        return metrics, start_position
-
-    with open(metrics_file, 'r') as f:
-        f.seek(start_position)
-        for line in f:
-            if line.strip():
-                try:
-                    data = json.loads(line)
-
-                    metric = MetricPoint(
-                        timestamp=data.get("timestamp", 0),
-                        elapsed_seconds=data.get("elapsed_seconds", 0),
-                        prefill_tps=data.get("prefill_tps", 0),
-                        prefill_tps_window=data.get("prefill_tps_window", 0),
-                        prefill_tpm_per_gpu=data.get("prefill_tpm_per_gpu", 0),
-                        generation_tps=data.get("generation_tps", 0),
-                        cache_hit_rate=data.get("cache_hit_rate", 0),
-                        ideal_cache_hit_rate=data.get("ideal_cache_hit_rate", 0),
-                        requests_completed=data.get("requests_completed", 0),
-                        requests_sent=data.get("requests_sent", 0),
-                        errors=data.get("errors", 0),
-                        in_flight=data.get("in_flight", 0),
-                        num_sessions_active=data.get("num_sessions_active", 0),
-                        num_sessions_retired=data.get("num_sessions_retired", 0),
-                        num_sessions_abandoned=data.get("num_sessions_abandoned", 0),
-                        num_sessions_total=data.get("num_sessions_total", 0),
-                        sessions_created_by_rate=data.get("sessions_created_by_rate", 0),
-                        sessions_abandoned_by_rate=data.get("sessions_abandoned_by_rate", 0),
-                        gpus=data.get("gpus", 1),
-                        window_size=data.get("window_size", 15.0),
-                        new_session_times=data.get("new_session_times", []),
-                        forced_session_times=data.get("forced_session_times", []),
-                        existing_session_requests=data.get("existing_session_requests", []),
-                        new_planned_prompt_lengths=data.get("new_planned_prompt_lengths", []),
-                        new_planned_ideal_cache_hit_rates=data.get("new_planned_ideal_cache_hit_rates", []),
-                        new_prompt_lengths=data.get("new_prompt_lengths", []),
-                        new_generation_lengths=data.get("new_generation_lengths", []),
-                        new_cache_hit_rates=data.get("new_cache_hit_rates", []),
-                        new_ideal_cache_hit_rates=data.get("new_ideal_cache_hit_rates", []),
-                        new_inter_arrival_times=data.get("new_inter_arrival_times", []),
-                        new_ttfts=data.get("new_ttfts", []),
-                        new_acceptance_lengths=data.get("new_acceptance_lengths", []),
-                        new_acceptance_rates=data.get("new_acceptance_rates", []),
-                    )
-                    metrics.append(metric)
-                except json.JSONDecodeError:
-                    pass
-        new_position = f.tell()
-
-    return metrics, new_position
-
-
-def scan_benchmarks(root_dir: Path) -> Dict[str, BenchmarkTrace]:
-    """Discover all benchmark data"""
-    traces = {}
-
-    if not root_dir.exists():
-        return traces
-
-    # Find all benchmark directories
-    for name_dir in root_dir.iterdir():
-        if not name_dir.is_dir():
-            continue
-
-        for timestamp_dir in name_dir.iterdir():
-            if not timestamp_dir.is_dir():
-                continue
-
-            benchmark_name = f"{name_dir.name}/{timestamp_dir.name}"
-
-            # Look for metrics.jsonl in this directory
-            metrics_file = timestamp_dir / "metrics.jsonl"
-            if metrics_file.exists():
-                trace_id = benchmark_name
-                label = name_dir.name
-
-                traces[trace_id] = BenchmarkTrace(
-                    label=label,
-                    benchmark_name=benchmark_name,
-                    metrics=[],
-                    file_path=metrics_file,
-                    all_new_session_times=[],
-                    all_forced_session_times=[],
-                    all_existing_session_requests=[],
-                    all_planned_prompt_lengths=[],
-                    all_planned_ideal_cache_hit_rates=[],
-                    all_prompt_lengths=[],
-                    all_generation_lengths=[],
-                    all_cache_hit_rates=[],
-                    all_ideal_cache_hit_rates=[],
-                    all_inter_arrival_times=[],
-                    metadata=load_metadata(timestamp_dir),
-                    log_analysis=load_log_analysis(timestamp_dir)
-                )
-
-    return traces
 
 
 def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:

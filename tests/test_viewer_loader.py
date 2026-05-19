@@ -10,15 +10,10 @@ in the past.
 import json
 from pathlib import Path
 
-import pytest
 
-# agent.viewer imports dash at module load. Skip the loader tests cleanly
-# when the optional [viewer] extras aren't installed instead of crashing
-# the test collection.
-pytest.importorskip("dash")
-
-# Import via the agent package path so it works after `pip install`.
-from agent.viewer import load_metrics, scan_benchmarks  # noqa: E402
+# The loaders live in agent/viewer_data.py and have NO Dash dependency,
+# so these tests can run in environments without the [viewer] extras.
+from agent.viewer_data import load_metrics, scan_benchmarks
 
 
 def _write_run(root: Path, name: str, timestamp: str, points: list) -> Path:
