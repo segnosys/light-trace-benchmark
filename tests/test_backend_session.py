@@ -11,7 +11,7 @@ import asyncio
 
 import aiohttp
 
-from lightrace.backends import OpenAIBackend, SGLangBackend
+from legacy.backends import OpenAIBackend, SGLangBackend
 
 
 def _run(coro):

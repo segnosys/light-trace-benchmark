@@ -1,9 +1,9 @@
 """
-Vendored helpers replacing what lightrace previously imported from
+Vendored helpers replacing what agent-bench previously imported from
 `sglang.bench_serving`. Pinning sglang in install_requires was downgrading
 the server-side sglang install (0.5.11 -> 0.5.2) whenever the benchmark was
 installed into the same Python env. These two functions cover everything
-lightrace actually used.
+agent-bench actually used.
 """
 import os
 import random
@@ -34,7 +34,7 @@ def get_tokenizer(name_or_path: str):
 
 @dataclass
 class _RandomRequest:
-    """Minimal record returned by sample_random_requests. lightrace only reads .prompt."""
+    """Minimal record returned by sample_random_requests. agent-bench only reads .prompt."""
     prompt: str
     prompt_len: int
     output_len: int
@@ -56,7 +56,7 @@ def sample_random_requests(
     Generate `num_prompts` random prompts each tokenizing to ~`input_len` tokens.
 
     This is a minimal stand-in for sglang.bench_serving.sample_random_requests
-    sufficient for lightrace's _build_sharegpt_inputs() call site. Strategy:
+    sufficient for agent-bench's _build_sharegpt_inputs() call site. Strategy:
 
       1. Pick a vocab subset from the tokenizer (skip specials/added).
       2. For each prompt, sample tokens, decode, and pad/trim by re-encoding

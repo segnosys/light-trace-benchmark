@@ -5,8 +5,8 @@ Pre-fix: outside burst mode the table rendered `Per-GPU tokens/s: 0.00`
 because `per_batch_elapsed_times` was None. Post-fix: fall back to
 total_output / total_elapsed / num_gpus when per-batch data isn't there.
 """
-from lightrace.analytics import _compute_per_device
-from lightrace.schema import LatencyProfile, ResultEntry
+from legacy.analytics import _compute_per_device
+from legacy.schema import LatencyProfile, ResultEntry
 
 
 def _r(out_tokens):

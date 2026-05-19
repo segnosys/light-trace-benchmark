@@ -4,8 +4,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import AsyncGenerator, Iterator, List, Optional, Tuple
 
-from lightrace.backends import BaseBackend
-from lightrace.schema import InferencePayload, ResultEntry
+from legacy.backends import BaseBackend
+from legacy.schema import InferencePayload, ResultEntry
 
 
 class LoadDriver(ABC):

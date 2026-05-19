@@ -3,7 +3,7 @@
 Pytest tests for the fixes added on `fix/functional-bugs`.
 
 ```bash
-# from the repo root, in a venv with lightrace installed:
+# from the repo root, in a venv with agent-bench installed:
 pip install pytest pyyaml
 pytest tests/ -v
 ```
@@ -19,6 +19,6 @@ Each file targets one slice:
 | `test_cache_aggregation.py` | `_extract_cache_hit_rate` mean + None handling; `_sum_cached_input_tokens` aggregation |
 | `test_sglang_compat.py` | Vendored `get_tokenizer` (local-path detection, repo-id fallthrough) + `sample_random_requests` (count, length, error paths) |
 | `test_input_pipeline_hf.py` | HF reader with `chat=true` auto-wraps plain-text columns (was a `JSONDecodeError` crash) |
-| `test_package_layout.py` | `agent/` and `lightrace/configs/` are accessible after install; YAML presets parse and declare a provider; `anthropic` is registered |
+| `test_package_layout.py` | `agent/` and `legacy/configs/` are accessible after install; YAML presets parse and declare a provider; `anthropic` is registered |
 
 These tests don't need network access or a real inference server — they exercise the pure-Python code paths via fakes/mocks. The wandb client integration and aiohttp HTTP loop are intentionally out of scope.

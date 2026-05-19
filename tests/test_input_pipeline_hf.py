@@ -6,7 +6,7 @@ and crashed. Now it should auto-wrap as a single user message.
 import json
 from unittest.mock import patch, MagicMock
 
-from lightrace.input_pipeline import InputPipeline
+from legacy.input_pipeline import InputPipeline
 
 
 def _fake_dataset(rows):
@@ -37,7 +37,7 @@ def test_chat_true_plain_text_column_auto_wraps_as_user_message():
         {"problem": "What is 2+2?"},
         {"problem": "Solve x^2 - 4 = 0"},
     ]
-    with patch("lightrace.input_pipeline.datasets.load_dataset",
+    with patch("legacy.input_pipeline.datasets.load_dataset",
                return_value=_fake_dataset(rows)):
         out = pipe.prepare_inputs()
 
@@ -54,7 +54,7 @@ def test_chat_true_json_string_column_decodes():
         {"problem": json.dumps([{"role": "user", "content": "msg-A"}])},
         {"problem": json.dumps([{"role": "user", "content": "msg-B"}])},
     ]
-    with patch("lightrace.input_pipeline.datasets.load_dataset",
+    with patch("legacy.input_pipeline.datasets.load_dataset",
                return_value=_fake_dataset(rows)):
         out = pipe.prepare_inputs()
     assert out[0].messages == [{"role": "user", "content": "msg-A"}]
@@ -66,7 +66,7 @@ def test_chat_true_list_column_passes_through():
     rows = [
         {"problem": [{"role": "user", "content": "hello"}]},
     ]
-    with patch("lightrace.input_pipeline.datasets.load_dataset",
+    with patch("legacy.input_pipeline.datasets.load_dataset",
                return_value=_fake_dataset(rows * 2)):
         out = pipe.prepare_inputs()
     assert out[0].messages == [{"role": "user", "content": "hello"}]
@@ -76,7 +76,7 @@ def test_chat_false_uses_prompt_field():
     """With chat=false we put the text in `prompt` and skip messages entirely."""
     pipe = _pipeline(chat=False)
     rows = [{"problem": "raw prompt text"}, {"problem": "another"}]
-    with patch("lightrace.input_pipeline.datasets.load_dataset",
+    with patch("legacy.input_pipeline.datasets.load_dataset",
                return_value=_fake_dataset(rows)):
         out = pipe.prepare_inputs()
     assert out[0].prompt == "raw prompt text"

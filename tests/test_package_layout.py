@@ -1,5 +1,5 @@
 """
-Tests for the wheel-packaging fixes: agent/ and lightrace/configs/ should
+Tests for the wheel-packaging fixes: agent/ and legacy/configs/ should
 ship as part of the installed package, and the helper accessors should
 return paths that actually exist on disk.
 """
@@ -7,7 +7,7 @@ return paths that actually exist on disk.
 import pytest
 
 import agent
-import lightrace
+import legacy
 
 
 def test_workloads_dir_exists():
@@ -35,12 +35,12 @@ def test_workload_yaml_files_are_nonempty():
 
 
 def test_configs_dir_exists():
-    p = lightrace.configs_dir()
+    p = legacy.configs_dir()
     assert p.exists() and p.is_dir(), f"missing dir: {p}"
 
 
 def test_list_configs_returns_known_presets():
-    names = set(lightrace.list_configs())
+    names = set(legacy.list_configs())
     must_have = {
         "chat_short",
         "rag_doc_qa",
@@ -63,7 +63,7 @@ def test_list_configs_returns_known_presets():
 def test_config_yamls_are_parseable():
     """Each shipped config must parse as YAML — silently corrupt YAML hurts."""
     yaml = pytest.importorskip("yaml")
-    for cfg_path in lightrace.configs_dir().glob("*.yaml"):
+    for cfg_path in legacy.configs_dir().glob("*.yaml"):
         with open(cfg_path) as f:
             data = yaml.safe_load(f)
         assert isinstance(data, dict), f"{cfg_path.name} did not parse to dict"
@@ -73,4 +73,4 @@ def test_config_yamls_are_parseable():
 
 def test_anthropic_backend_registered():
     """Bug #9 dataset entry — make sure the new provider is wired."""
-    assert "anthropic" in lightrace.REGISTERED_BACKENDS
+    assert "anthropic" in legacy.REGISTERED_BACKENDS

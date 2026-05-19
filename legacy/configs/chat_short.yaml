@@ -11,7 +11,7 @@
 # Override with: --base_url, --model_name, --tokenizer_name on the CLI.
 #
 # Example:
-#   lightrace --config $(python -c 'import lightrace; print(lightrace.configs_dir() / "chat_short.yaml")') \
+#   agent-bench legacy --config $(python -c 'import legacy; print(legacy.configs_dir() / "chat_short.yaml")') \
 #             --base_url http://localhost:8001/v1 \
 #             --model_name your/model --tokenizer_name your/tokenizer
 

@@ -2,7 +2,7 @@
 Polls Prometheus /metrics from the inference server alongside the client run.
 
 When the user passes `--engine_metrics_url http://server:port/metrics`,
-lightrace launches a background poller that samples sglang/vllm's exported
+agent-bench launches a background poller that samples sglang/vllm's exported
 metrics every second for the duration of a run. The collected samples are
 summarized into the BenchmarkReport so users can cross-check client-observed
 TPOT against server-reported running/waiting queues, batch sizes, and
@@ -24,7 +24,7 @@ from typing import Dict, List, Optional
 import aiohttp
 
 
-# Subset of metric names lightrace surfaces. Both sglang and vllm expose
+# Subset of metric names agent-bench surfaces. Both sglang and vllm expose
 # OpenAI-compat /metrics; sglang names below match v0.5.x.
 # Add new keys here when you want them in the summary.
 METRIC_NAMES = (

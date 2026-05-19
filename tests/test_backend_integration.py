@@ -17,14 +17,14 @@ import json
 import pytest
 from aiohttp import web
 
-from lightrace.backends import (
+from legacy.backends import (
     AnthropicBackend,
     OpenAIBackend,
     SGLangBackend,
     TogetherBackend,
     VllmBackend,
 )
-from lightrace.schema import InferencePayload
+from legacy.schema import InferencePayload
 
 
 # ---------- OpenAI-compatible chat completions fake ----------

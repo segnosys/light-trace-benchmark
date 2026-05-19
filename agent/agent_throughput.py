@@ -59,10 +59,14 @@ _ASCII_BYTES = np.array(list(_ASCII_CHARS.encode('ascii')), dtype=np.uint8)
 
 
 # Optional agent-style corpus replacement.
-# If env LIGHTRACE_AGENT_CORPUS is set, make_filler_seeded() returns text
-# composed of real code files from the corpus instead of random ASCII.
-import os as _os  # noqa: E402  -- intentionally placed near the LIGHTRACE_AGENT_CORPUS block
-_AGENT_CORPUS_PATH = _os.environ.get("LIGHTRACE_AGENT_CORPUS")
+# If env AGENT_BENCH_CORPUS (legacy: LIGHTRACE_AGENT_CORPUS) is set,
+# make_filler_seeded() returns text composed of real code files from the
+# corpus instead of random ASCII.
+import os as _os  # noqa: E402  -- intentionally placed near the corpus-env block
+_AGENT_CORPUS_PATH = (
+    _os.environ.get("AGENT_BENCH_CORPUS")
+    or _os.environ.get("LIGHTRACE_AGENT_CORPUS")
+)
 _AGENT_CORPUS = None  # lazy-loaded
 
 
@@ -75,7 +79,7 @@ def _load_agent_corpus():
             _AGENT_CORPUS = json.load(_f)
         # Pre-compute total token count.
         _AGENT_CORPUS_TOTAL = sum(len(e["tokens"]) for e in _AGENT_CORPUS)
-        print(f"[lightrace] loaded agent corpus from {_AGENT_CORPUS_PATH}: "
+        print(f"[agent-bench] loaded agent corpus from {_AGENT_CORPUS_PATH}: "
               f"{len(_AGENT_CORPUS)} entries, {_AGENT_CORPUS_TOTAL:,} tokens",
               flush=True)
     return _AGENT_CORPUS
@@ -538,8 +542,9 @@ def make_filler_seeded(target_tokens: int, tokenizer, seed: int) -> str:
     Optimized: Uses numpy vectorized operations which is ~100x faster than
     Python loops. Generates random indices into pre-computed byte array.
 
-    If LIGHTRACE_AGENT_CORPUS env var is set, delegates to make_agent_filler_seeded
-    which produces realistic chatml-shaped agent prompts from a code corpus.
+    If AGENT_BENCH_CORPUS (legacy: LIGHTRACE_AGENT_CORPUS) env var is set,
+    delegates to make_agent_filler_seeded which produces realistic chatml-shaped
+    agent prompts from a code corpus.
     """
     if target_tokens <= 0:
         return ""

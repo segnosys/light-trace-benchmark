@@ -1,6 +1,6 @@
 from pathlib import Path as _Path
 
-from lightrace import backends
+from legacy import backends
 
 REGISTERED_BACKENDS = {
     "together": backends.TogetherBackend,
@@ -19,8 +19,8 @@ REGISTERED_BACKENDS = {
 def configs_dir():
     """Filesystem path to the bundled batch-mode workload config YAMLs.
 
-    Pass any of these to `lightrace --config <path>` to skip writing your
-    own YAML for a typical serving scenario.
+    Pass any of these to `agent-bench batch --config <path>` to skip writing
+    your own YAML for a typical serving scenario.
     """
     return _Path(__file__).parent / "configs"
 

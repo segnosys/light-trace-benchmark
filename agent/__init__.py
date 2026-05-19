@@ -1,10 +1,10 @@
 """
 agent-throughput driver and code-agent workload profiles.
 
-This subpackage ships as part of the lightrace wheel so `pip install lightrace`
-gets you both batch (`lightrace`) and agent (`lightrace-agent`) entry points.
-The workload YAMLs live next to this file under `workloads/`; resolve them
-with `agent.workloads_dir()` or by `--workload-config <abs path>`.
+This subpackage ships as part of the agent-bench wheel so `pip install agent-bench`
+gets you both `agent-bench batch` and `agent-bench agent` subcommands. The
+workload YAMLs live next to this file under `workloads/`; resolve them with
+`agent.workloads_dir()` or by `--workload-config <abs path>`.
 """
 from pathlib import Path
 

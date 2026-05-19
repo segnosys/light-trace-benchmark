@@ -631,7 +631,7 @@ contract works. Two things to double-check per backend:
 
 ---
 
-## Realistic corpus mode (`LIGHTRACE_AGENT_CORPUS`)
+## Realistic corpus mode (`AGENT_BENCH_CORPUS`)
 
 The default filler is random ASCII. That's fine for cache-hit / TPM
 plumbing, but the prompts don't *look* like agent traffic — short,
@@ -639,7 +639,8 @@ homogeneous sentences tokenize very differently from real source code or
 multi-turn ChatML, which can mask tokenizer- or template-sensitive
 regressions in the server.
 
-Setting `LIGHTRACE_AGENT_CORPUS=/path/to/corpus.json` flips
+Setting `AGENT_BENCH_CORPUS=/path/to/corpus.json` (legacy:
+`LIGHTRACE_AGENT_CORPUS`, still honored as a fallback) flips
 `make_filler_seeded()` into a chatml-shaped builder that assembles the
 prompt from real code chunks plus a small natural-language overlay
 (reviewer notes, README-style explanations). When the env var is unset
@@ -670,7 +671,7 @@ want a larger corpus.
 ### Use a corpus in a run
 
 ```bash
-export LIGHTRACE_AGENT_CORPUS=/scratch/agent_corpus_mymodel.json
+export AGENT_BENCH_CORPUS=/scratch/agent_corpus_mymodel.json
 
 python3 runner.py \
     --name code-agent-real \
@@ -681,7 +682,7 @@ python3 runner.py \
 ```
 
 The first request prints e.g.
-`[lightrace] loaded agent corpus from /scratch/...: 552 entries, 1,166,108 tokens`
+`[agent-bench] loaded agent corpus from /scratch/...: 552 entries, 1,166,108 tokens`
 to confirm the corpus was picked up.
 
 ### Workload yamls included
