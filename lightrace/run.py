@@ -28,6 +28,7 @@ from lightrace.cli_options import (
 from lightrace.input_pipeline import InputPipeline
 from lightrace.bench_runner import InferenceBenchRunner
 from lightrace.analytics import (
+    estimate_ideal_cache_hit_rate,
     export_report_csv,
     render_report,
     summarize_benchmark,
@@ -105,7 +106,7 @@ def main(argv: List[str] | None = None):
         argv = sys.argv[1:]
     filtered_argv, extra_eval_metadata = _extract_extra_eval_metadata(parser, argv)
     args = parser.parse_args(filtered_argv)
-    setattr(args, "extra_eval_metadata", extra_eval_metadata)
+    args.extra_eval_metadata = extra_eval_metadata
     pprint(args.as_dict())
 
     # Validate LoRA arguments
@@ -141,11 +142,11 @@ def main(argv: List[str] | None = None):
                     f"Loaded {len(adapter_paths_list)} adapter path(s) from "
                     f"{args.adapter_paths_file}"
                 )
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             raise ValueError(
                 f"Adapter paths file not found: {args.adapter_paths_file}. "
                 "Please ensure the file exists and the path is correct."
-            )
+            ) from e
 
     # Validate that LoRA source and lora_ratio are specified together
     has_lora_source = bool(args.adapter_paths) or bool(args.lora_names)
@@ -211,6 +212,7 @@ def main(argv: List[str] | None = None):
         together_api_key=args.together_api_key,
         hf_dataset=args.hf_dataset,
         hf_dataset_split=args.hf_dataset_split,
+        hf_dataset_config=args.hf_dataset_config,
         hf_dataset_column_name=args.hf_dataset_column_name,
         synthetic_input_length=args.synthetic_input_length,
         synthetic_output_length=args.synthetic_output_length,
@@ -311,6 +313,23 @@ def main(argv: List[str] | None = None):
                 for result in results:
                     f.write(result.to_json() + "\n")
 
+        # Compute the workload-predicted ideal cache hit rate so we can
+        # compare it against what the server reports. `level` is the active
+        # concurrency or QPS for this iteration of the sweep.
+        ideal_cache = estimate_ideal_cache_hit_rate(
+            provider=args.provider,
+            dataset_type=args.dataset_type,
+            num_examples=args.num_examples or 0,
+            concurrency=int(level) if args.traffic_pattern in ("burst", "concurrent") else None,
+            max_num_burst=args.max_num_burst,
+            same_prompts_in_burst=parse_bool_string(args.same_prompts_in_burst),
+            synthetic_input_length=args.synthetic_input_length,
+            synthetic_cached_input_length=args.synthetic_cached_input_length,
+            gsp_cached_fraction=args.gsp_cached_fraction,
+            gsp_groups=args.gsp_groups,
+            traffic_pattern=args.traffic_pattern,
+        )
+
         # aggregate results
         report = summarize_benchmark(
             traffic_mode=args.traffic_pattern,
@@ -325,6 +344,7 @@ def main(argv: List[str] | None = None):
             hf_dataset_name=args.hf_dataset if args.dataset_type == "hf" else None,
             engine_log_path=engine_log_path,
             accept_rate_pattern=accept_rate_pattern,
+            ideal_cache_hit_rate=ideal_cache,
         )
         render_report(report)
 

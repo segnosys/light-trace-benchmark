@@ -1,0 +1,30 @@
+# Workload: Realistic prefix-cache benchmark (gsp mode, ~80% cached)
+#
+# Uses generated-shared-prefix (gsp) — a controlled mix where 80% of each
+# prompt comes from a cacheable pool and 20% is unique per request. Tests
+# whether the server's prefix cache (radix tree / continuous batching)
+# actually delivers the cache hit it should.
+#
+# The non-cacheable suffix uses MATH-500 problems; the cacheable prefix
+# uses pg19 (long-form prose). Both are public. Server should report
+# ~80% cache_hit; if you only see <40%, prefix caching is broken or your
+# radix-cache size is too small.
+
+provider: sglang
+traffic_pattern: burst
+concurrency: 16
+max_num_burst: 4
+
+dataset_type: generated-shared-prefix
+gsp_cached_fraction: 0.8                # 80% prefix shared
+gsp_groups: 4                           # 4 distinct prefix groups in the workload
+# gsp_hf_dataset/gsp_cacheable_dataset use the fixed public defaults
+
+synthetic_input_length: 4000            # target ~4K tokens/prompt
+synthetic_output_length: 200
+num_examples: 64                        # divisible by groups (4) and concurrency (16)
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 200

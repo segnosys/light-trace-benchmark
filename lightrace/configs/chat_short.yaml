@@ -1,0 +1,30 @@
+# Workload: ChatGPT-style single-turn chat
+#
+# Typical SaaS chatbot dashboard. Short prompts, short replies, high
+# concurrency. Stresses scheduling + decode throughput, not prefill or KV.
+#
+# What it answers:
+#   - Per-user TPS at 32-concurrent steady-state load
+#   - TTFT p50/p99 at this concurrency
+#   - Job-level token/s headroom
+#
+# Override with: --base_url, --model_name, --tokenizer_name on the CLI.
+#
+# Example:
+#   lightrace --config $(python -c 'import lightrace; print(lightrace.configs_dir() / "chat_short.yaml")') \
+#             --base_url http://localhost:8001/v1 \
+#             --model_name your/model --tokenizer_name your/tokenizer
+
+provider: sglang
+traffic_pattern: concurrent
+concurrency: 32
+
+dataset_type: synthetic
+synthetic_input_length: 200
+synthetic_output_length: 200
+num_examples: 320               # ~10 rounds at concurrency=32
+
+chat: 'true'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 200

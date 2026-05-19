@@ -6,13 +6,36 @@ Live dashboard for simulation benchmark visualization
 import json
 import argparse
 import statistics
-import colorsys
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 from dash import Dash, html, dcc, callback, Input, Output
 import plotly.graph_objects as go
+
+
+# Module-level so closures don't capture loop-local rebindings (B023). 10 colors
+# x 4 shapes lets us label up to 40 distinct sessions before symbols repeat.
+SESSION_PALETTE_COLORS = [
+    "#2ecc71",  # Green
+    "#3498db",  # Blue
+    "#9b59b6",  # Purple
+    "#f39c12",  # Orange
+    "#1abc9c",  # Teal
+    "#e91e63",  # Pink
+    "#00bcd4",  # Cyan
+    "#8bc34a",  # Light green
+    "#ff9800",  # Amber
+    "#673ab7",  # Deep purple
+]
+SESSION_PALETTE_SHAPES = ["circle", "square", "diamond", "triangle-up"]
+
+
+def session_style(idx: int):
+    """Stable color + shape for a given session index, paged through the palette."""
+    color = SESSION_PALETTE_COLORS[idx % len(SESSION_PALETTE_COLORS)]
+    shape = SESSION_PALETTE_SHAPES[(idx // len(SESSION_PALETTE_COLORS)) % len(SESSION_PALETTE_SHAPES)]
+    return color, shape
 
 
 @dataclass
@@ -539,15 +562,31 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                     dt = datetime.strptime(timestamp_str, "%Y-%m-%d-%H-%M-%S")
                     time_display = dt.strftime("%b %d, %H:%M")
                     label = f"{trace.label}  -  {time_display}"
-                except:
+                except ValueError:
                     label = trace.label
             else:
                 label = trace.label
             options.append({'label': label, 'value': trace_id})
 
-        status = f"Found {len(benchmark_traces)} benchmark runs"
-        if new_count > 0:
-            status += f" (+{new_count} new)"
+        if not benchmark_traces:
+            # Empty-state UX: instead of a blank dashboard, tell the user
+            # where the viewer is looking and what shape it expects.
+            _data_dir_str = str(app.data_dir)
+            status = html.Div([
+                html.Strong("No benchmark runs found in "),
+                html.Code(_data_dir_str),
+                html.Br(),
+                html.Span(
+                    f"Launch a run with `lightrace-agent --data-dir {_data_dir_str} ...` "
+                    "and the dashboard will pick it up automatically. The viewer scans for "
+                ),
+                html.Code("<name>/<YYYY-MM-DD-HH-MM-SS>/metrics.jsonl"),
+                html.Span(" beneath the configured --data-dir."),
+            ], style={"color": "#6c757d", "padding": "10px", "lineHeight": "1.6"})
+        else:
+            status = f"Found {len(benchmark_traces)} benchmark runs"
+            if new_count > 0:
+                status += f" (+{new_count} new)"
 
         # Update traces with latest data
         selected_traces = selected_traces or []
@@ -737,27 +776,10 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                         session_order.append(session_id)
                     session_requests[session_id].append(time_val)
 
-                # Use distinct colors + shapes for maximum differentiation
-                # 10 distinct colors (avoiding red which is for new sessions)
-                distinct_colors = [
-                    '#2ecc71',  # Green
-                    '#3498db',  # Blue
-                    '#9b59b6',  # Purple
-                    '#f39c12',  # Orange
-                    '#1abc9c',  # Teal
-                    '#e91e63',  # Pink
-                    '#00bcd4',  # Cyan
-                    '#8bc34a',  # Light green
-                    '#ff9800',  # Amber
-                    '#673ab7',  # Deep purple
-                ]
-                # 4 distinct shapes
-                distinct_shapes = ['circle', 'square', 'diamond', 'triangle-up']
-
-                def get_session_style(idx):
-                    color = distinct_colors[idx % len(distinct_colors)]
-                    shape = distinct_shapes[(idx // len(distinct_colors)) % len(distinct_shapes)]
-                    return color, shape
+                # Use module-level palette + helper so we don't capture
+                # loop-local rebindings (was a B023 lint hit) and so the
+                # palette lists aren't rebuilt for every trace iteration.
+                get_session_style = session_style
 
                 # Build session style map for legend and store globally
                 for idx, session_id in enumerate(session_order):
@@ -1825,11 +1847,9 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
 
                 # Sessions
                 num_active = latest.num_sessions_active if latest else 0
-                num_retired = latest.num_sessions_retired if latest else 0
                 num_abandoned = latest.num_sessions_abandoned if latest else 0
                 num_total = latest.num_sessions_total if latest else 0
                 created_by_rate = latest.sessions_created_by_rate if latest else 0
-                abandoned_by_rate = latest.sessions_abandoned_by_rate if latest else 0
                 results_rows.append(html.Div([
                     html.Span("Sessions", className='stats-label'),
                     html.Span(f"{num_active}/{num_total} (+{created_by_rate} -{num_abandoned})", className='stats-value')
@@ -2072,7 +2092,7 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                     for d in sched_with_ts:
                         try:
                             timestamps.append(dt.fromisoformat(d['timestamp']))
-                        except:
+                        except (ValueError, TypeError, KeyError):
                             pass
 
                     if timestamps:
@@ -2119,7 +2139,7 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                     for d in batch_with_ts:
                         try:
                             timestamps.append(dt.fromisoformat(d['timestamp']))
-                        except:
+                        except (ValueError, TypeError, KeyError):
                             pass
 
                     if timestamps:

@@ -32,6 +32,13 @@ class LatencyProfile:
     char_throughput: Optional[float] = None
     ms_per_char: Optional[float] = None
     accept_ratio: Optional[float] = None
+    # Prompt-cache reporting from the backend's usage block.
+    # - OpenAI / sglang / vllm: usage.prompt_tokens_details.cached_tokens
+    # - Anthropic: usage.cache_read_input_tokens (reads) and
+    #              usage.cache_creation_input_tokens (writes — first request
+    #              that creates the cache entry).
+    cached_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -72,6 +79,12 @@ class InferencePayload:
     lora_name: Optional[str] = None
     reasoning_effort: Optional[str] = None
     reasoning: Optional[dict] = None
+    # Explicit cache breakpoint hint. When set, backends that honor explicit
+    # cache markers (Anthropic) split the prompt at the end of this text and
+    # mark only the prefix portion with cache_control. Servers with implicit
+    # prefix-cache detection (sglang, vllm, OpenAI) ignore it — their radix
+    # trees pick up any shared prefix automatically.
+    cacheable_prefix: Optional[str] = None
 
     def to_dict(self):
         return dataclasses.asdict(self)
@@ -112,6 +125,9 @@ class FragmentInfo:
     usage_tokens: Optional[int]
     prompt_usage_tokens: Optional[int]
     accept_ratio: Optional[float] = None
+    # Per-chunk cache fields — backends populate these from usage when available.
+    cached_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
 
 
 @dataclass
@@ -177,3 +193,11 @@ class BenchmarkReport:
     per_device: Optional[DeviceThroughput] = None
     accept_ratio: Optional[StatsSummary] = None
     hf_dataset_name: Optional[str] = None
+    # Aggregated cache stats across the run; None if no backend reported cache info.
+    cache_hit_rate: Optional[StatsSummary] = None
+    total_cached_input_tokens: Optional[int] = None
+    # Workload-predicted ideal cache hit rate (0..1). Filled in by run.py from
+    # the workload parameters (same_prompts_in_burst, synthetic_cached_input_length,
+    # gsp_cached_fraction, etc.). Compare against cache_hit_rate.mean to spot
+    # broken or absent cache reporting on the server side.
+    ideal_cache_hit_rate: Optional[float] = None

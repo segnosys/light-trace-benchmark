@@ -1,0 +1,42 @@
+# Workload: ChatGPT-style assistant (short prompts, frequent new sessions)
+#
+# Different from code_agent_*.yaml: each "session" is short-lived (3-5 turns)
+# with small per-turn growth. Average prompt stays under ~3K, generation is
+# moderate. High new_session_rate so sessions don't accumulate giant prefixes.
+#
+# Use when you want to benchmark a chatbot serving shape rather than a
+# code-agent shape.
+
+workload:
+  system_prompt_len:     400         # short system prompt
+  initial_prefix_mean:   500         # ~one paragraph of intro
+  initial_prefix_median: 400
+  new_tokens_mean:       400         # avg user turn delta
+  new_tokens_median:     250
+  max_prompt_tokens:     4000        # retire well before any long context
+
+  # High new-session rate => most "turns" are first turns of fresh sessions
+  new_session_rate:      0.30
+  session_decay_lambda:  0.020       # forget old sessions quickly
+  initial_sessions:      8
+
+  # Moderate response length
+  generation_length_mean:   500
+  generation_length_median: 350
+
+  # Traffic shape — open, bursty, ChatGPT-dashboard-like
+  initial_qps:      0.2
+  max_qps:          2.0
+  ramp_duration:    30
+  sustain_duration: 180
+  max_inflight:     32
+  poisson:          true
+  poisson_shape:    2
+
+  acc_len:             1.0
+  mtp_overhead_factor: 1.0
+  mtp_draft_tokens:    3
+  tokenizer:           Qwen/Qwen3-30B-A3B
+  gpus:                1
+  window:              30
+  random_seed:         1337

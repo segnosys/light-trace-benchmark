@@ -1,0 +1,24 @@
+# Workload: Long-reasoning / chain-of-thought (R1/o1 style)
+#
+# Moderate prompt (~2K) but very long generation (~8K thinking + answer).
+# Stresses decode TPOT and KV-cache memory most — the single longest
+# in-flight request determines tail latency.
+#
+# What it answers:
+#   - Per-user TPS when output dominates
+#   - Decode-step time stability over a long generation
+#   - Whether KV-cache pressure causes preemption
+
+provider: sglang
+traffic_pattern: concurrent
+concurrency: 8                  # long generations limit useful concurrency
+
+dataset_type: synthetic
+synthetic_input_length: 2000
+synthetic_output_length: 8000
+num_examples: 32                # 4 rounds at concurrency=8
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 8000

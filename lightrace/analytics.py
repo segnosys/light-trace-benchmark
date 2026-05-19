@@ -85,6 +85,37 @@ def compute_distribution(values: List[int]) -> OutputDistribution:
     )
 
 
+def _compute_per_device(
+    *,
+    results: List[ResultEntry],
+    per_batch_elapsed_times: Optional[List[float]],
+    traffic_level: float,
+    num_gpus: Optional[int],
+    total_elapse_time_s: float,
+) -> DeviceThroughput:
+    """
+    Per-GPU throughput. Uses per-batch data when available (burst pattern);
+    otherwise falls back to total_decode_tokens / total_elapsed / num_gpus
+    so concurrent/qps modes still report a meaningful number instead of 0.
+    """
+    if num_gpus is None or num_gpus <= 0:
+        return DeviceThroughput(num_gpus=-1, tps_mean=0, tps_stdev=0)
+
+    if per_batch_elapsed_times:
+        return compute_device_throughput(
+            results, per_batch_elapsed_times, int(traffic_level), num_gpus
+        )
+
+    # Fallback: aggregate decode tokens / wall time / GPU count.
+    total_output = sum(
+        r.metrics.output_token_count
+        for r in results
+        if r.metrics and r.metrics.output_token_count
+    )
+    tps = (total_output / total_elapse_time_s / num_gpus) if total_elapse_time_s > 0 else 0.0
+    return DeviceThroughput(num_gpus=num_gpus, tps_mean=tps, tps_stdev=0.0)
+
+
 def compute_device_throughput(
     results: List[ResultEntry],
     per_batch_elapsed_times: List[float],
@@ -106,6 +137,105 @@ def compute_device_throughput(
     )
 
 
+def estimate_ideal_cache_hit_rate(
+    *,
+    provider: str,
+    dataset_type: str,
+    num_examples: int,
+    concurrency: Optional[int] = None,
+    max_num_burst: Optional[int] = None,
+    same_prompts_in_burst: bool = False,
+    synthetic_input_length: Optional[int] = None,
+    synthetic_cached_input_length: Optional[int] = None,
+    gsp_cached_fraction: Optional[float] = None,
+    gsp_groups: Optional[int] = None,
+    traffic_pattern: Optional[str] = None,
+) -> Optional[float]:
+    """
+    Predicted per-request cache hit ratio from workload params.
+
+    Compare this against the server-reported cache_hit_rate.mean to spot:
+      - cache feature disabled / misconfigured server (actual << ideal)
+      - over-attribution / double-counting (actual > ideal by a wide margin)
+      - workload that simply can't hit cache (returns None)
+
+    Approximations:
+      * "First request creates, rest hit" — assumes no eviction within the run.
+      * Anthropic Sonnet/Haiku minimum cacheable size is 1024 tokens; if the
+        cacheable chunk is smaller, returns 0.0 for anthropic provider.
+      * 5-min TTL is ignored — benchmark runs should fit inside one window.
+
+    Anthropic protocol notes:
+      Cache hits require the prefix UP TO AND INCLUDING the cache_control
+      marker to match across requests. AnthropicBackend places the marker:
+        - on the system block when messages-mode payloads have one
+        - on the cacheable-prefix block when InferencePayload.cacheable_prefix
+          is set (synthetic + synthetic_cached_input_length path)
+        - on the entire user block otherwise (same_prompts_in_burst path)
+      For dataset shapes where the marker can't be cleanly placed against a
+      shared prefix (e.g. generated-shared-prefix today), ideal returns 0.
+
+    Returns None when the shape doesn't admit a clean estimate.
+    """
+    # Anthropic Sonnet/Haiku won't cache chunks below this; Opus is 2048.
+    anthropic_min_cacheable = 1024 if provider == "anthropic" else 0
+
+    # Case 1: identical prompts repeated -> trivially cacheable
+    if same_prompts_in_burst:
+        bursts = max(1, max_num_burst or 1)
+        per_burst = max(1, concurrency or 1)
+        total = bursts * per_burst
+        if total <= 1:
+            return 0.0
+        # Each burst: 1 write + (per_burst - 1) reads. Across all bursts the
+        # avg hit per request is approximately (per_burst - 1) / per_burst,
+        # ignoring cross-burst sharing (which would only help).
+        avg_hit = (per_burst - 1) / per_burst
+        # Anthropic only caches >= 1024-token chunks.
+        if synthetic_input_length and synthetic_input_length < anthropic_min_cacheable:
+            return 0.0
+        return avg_hit
+
+    # Case 2: synthetic with a fixed cacheable prefix
+    if (
+        dataset_type == "synthetic"
+        and synthetic_cached_input_length
+        and synthetic_input_length
+        and synthetic_input_length > 0
+    ):
+        # First request creates cache, rest read. Over num_examples:
+        eff = max(0.0, (num_examples - 1) / num_examples) if num_examples else 0.0
+        cache_frac = synthetic_cached_input_length / synthetic_input_length
+        if synthetic_cached_input_length < anthropic_min_cacheable:
+            return 0.0
+        return eff * cache_frac
+
+    # Case 3: generated-shared-prefix mode (gsp)
+    if dataset_type == "generated-shared-prefix" and gsp_cached_fraction is not None:
+        # Anthropic protocol guardrail: gsp doesn't currently expose the
+        # shared-prefix boundary via InferencePayload.cacheable_prefix, so
+        # AnthropicBackend marks the whole content -> cache key includes the
+        # varying suffix -> 0% hit. Servers with implicit prefix caching
+        # (sglang, vllm, OpenAI radix) still work.
+        if provider == "anthropic":
+            return 0.0
+        groups = max(1, gsp_groups or 1)
+        # Per group: 1 write + (n_per_group - 1) reads
+        n_per_group = max(1, num_examples // groups)
+        if n_per_group <= 1:
+            return 0.0
+        eff = (n_per_group - 1) / n_per_group
+        # Approximate cacheable size from gsp_cached_fraction * total prompt.
+        if synthetic_input_length:
+            approx_cached_tokens = synthetic_input_length * gsp_cached_fraction
+            if approx_cached_tokens < anthropic_min_cacheable:
+                return 0.0
+        return eff * gsp_cached_fraction
+
+    # No clean estimate (sharegpt random, hf one-shot, jsonl, etc.)
+    return None
+
+
 def summarize_benchmark(
     traffic_mode: str,
     traffic_level: float,
@@ -119,6 +249,7 @@ def summarize_benchmark(
     hf_dataset_name: Optional[str] = None,
     engine_log_path: Optional[str] = None,
     accept_rate_pattern: Optional[str] = None,
+    ideal_cache_hit_rate: Optional[float] = None,
 ) -> BenchmarkReport:
     success_results = [result for result in results if result.success]
 
@@ -182,12 +313,12 @@ def summarize_benchmark(
             actual_qps=len(results) / total_elapse_time_s,
             num_failed_requests=len(results) - len(success_results),
         ),
-        per_device=(
-            DeviceThroughput(-1 if num_gpus is None else num_gpus, 0, 0)
-            if per_batch_elapsed_times is None or num_gpus is None
-            else compute_device_throughput(
-                success_results, per_batch_elapsed_times, int(traffic_level), num_gpus
-            )
+        per_device=_compute_per_device(
+            results=success_results,
+            per_batch_elapsed_times=per_batch_elapsed_times,
+            traffic_level=traffic_level,
+            num_gpus=num_gpus,
+            total_elapse_time_s=total_elapse_time_s,
         ),
         accept_ratio=(
             extract_accept_rate_from_responses(
@@ -202,7 +333,38 @@ def summarize_benchmark(
             )
         ),
         hf_dataset_name=hf_dataset_name,
+        cache_hit_rate=_extract_cache_hit_rate(success_results, histogram_metrics),
+        total_cached_input_tokens=_sum_cached_input_tokens(success_results),
+        ideal_cache_hit_rate=ideal_cache_hit_rate,
     )
+
+
+def _extract_cache_hit_rate(
+    results: List[ResultEntry], dump_raw: bool
+) -> Optional[StatsSummary]:
+    """Per-request cache hit ratio (cached / total input). None if no backend reported."""
+    ratios = []
+    for r in results:
+        if not r.metrics:
+            continue
+        cached = r.metrics.cached_input_tokens
+        total = r.metrics.input_token_count
+        if cached is None or not total or total <= 0:
+            continue
+        ratios.append(cached / total)
+    if not ratios:
+        return None
+    return compute_percentiles(ratios, dump_raw=dump_raw)
+
+
+def _sum_cached_input_tokens(results: List[ResultEntry]) -> Optional[int]:
+    total = 0
+    saw_any = False
+    for r in results:
+        if r.metrics and r.metrics.cached_input_tokens is not None:
+            total += r.metrics.cached_input_tokens
+            saw_any = True
+    return total if saw_any else None
 
 
 def render_report(report: BenchmarkReport) -> None:
@@ -256,6 +418,40 @@ def render_report(report: BenchmarkReport) -> None:
                     else [
                         "Acceptance rate:",
                         f"{report.accept_ratio.mean:.2f} +/- {report.accept_ratio.stdev:.2f}",
+                    ]
+                ),
+                (
+                    ["", ""]
+                    if report.ideal_cache_hit_rate is None
+                    else [
+                        "Ideal cache hit rate (workload-predicted):",
+                        f"{100 * report.ideal_cache_hit_rate:.1f}%",
+                    ]
+                ),
+                (
+                    ["", ""]
+                    if report.cache_hit_rate is None
+                    else [
+                        "Prompt cache hit rate (server-reported):",
+                        f"{100 * report.cache_hit_rate.mean:.1f}% +/- {100 * report.cache_hit_rate.stdev:.1f}%",
+                    ]
+                ),
+                (
+                    ["", ""]
+                    if (report.cache_hit_rate is None
+                        or report.ideal_cache_hit_rate is None
+                        or report.ideal_cache_hit_rate <= 0)
+                    else [
+                        "Cache efficiency (server / ideal):",
+                        f"{100 * report.cache_hit_rate.mean / report.ideal_cache_hit_rate:.1f}%",
+                    ]
+                ),
+                (
+                    ["", ""]
+                    if report.total_cached_input_tokens is None
+                    else [
+                        "Total cached input tokens:",
+                        f"{report.total_cached_input_tokens}",
                     ]
                 ),
                 ["Job-level tokens/s (decode):", f"{report.overview.job_level_tps:.2f}"],

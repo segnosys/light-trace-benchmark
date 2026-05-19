@@ -12,3 +12,35 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+# Match the project's existing 100-col limit (kept from tool.black).
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/F = pyflakes + pycodestyle defaults. B = flake8-bugbear (catches real
+# bugs: mutable default args, function-uses-loop-variable, bare excepts,
+# overly-broad excepts). Pyupgrade / typing modernization not enabled today
+# — large diff, low value until we do a typed pass (see 1-week followup).
+select = ["E", "F", "B"]
+# Intentional exceptions:
+#   B007 — Many for-loops use unused control variables only as a counter;
+#          renaming to `_` would touch a lot of lines for no real win.
+#   B023 — All remaining sites invoke the inner function within the same
+#          loop iteration; no deferred-binding bug surfaces in practice.
+#          (The viewer's prior real B023 was fixed by moving the palette
+#          to module scope; agent_throughput.py:per_min is similar.)
+#   B027 — BaseBackend.before_request / after_request are optional hooks,
+#          not abstract methods. Subclasses override on demand.
+#   B904 — Some `raise X(...)` inside excepts are intentional re-raises
+#          where chain is not informative; left case-by-case.
+#   B905 — zip-strict; every site needs verification of intent before
+#          adding `strict=`. Defer to a typed pass.
+ignore = [
+    "B007", "B023", "B027", "B904", "B905",
+    # Line length: pre-existing code wasn't written to 100 cols; running
+    # `ruff format` would reflow ~20 files in a noisy diff. Defer to a
+    # dedicated formatting pass — gate on real bugs in the meantime.
+    "E501",
+]

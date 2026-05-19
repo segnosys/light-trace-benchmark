@@ -20,7 +20,9 @@ lm_eval/caching/.cache
 wandb
 examples/wandb
 
-tests
+# `tests/` is a real pytest package now; only ignore generated artifacts.
+tests/__pycache__/
+tests/.pytest_cache/
 results
 tmp*
 torchelastic*

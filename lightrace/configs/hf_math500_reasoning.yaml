@@ -1,0 +1,25 @@
+# Workload: Real prompts from HuggingFaceH4/MATH-500
+#
+# Public math-reasoning eval set (500 grade-12 problems). Used here as a
+# realistic prompt distribution for short-prompt-long-output reasoning
+# serving. No auth required.
+#
+# What it answers:
+#   - User TPS on real (not synthetic) prompt distribution
+#   - TTFT spread caused by variable prompt lengths
+#   - Decode TPS for long reasoning outputs
+
+provider: sglang
+traffic_pattern: concurrent
+concurrency: 8                  # long outputs limit useful concurrency
+
+dataset_type: hf
+hf_dataset: HuggingFaceH4/MATH-500
+hf_dataset_split: test
+hf_dataset_column_name: problem
+num_examples: 64                # 8 rounds at concurrency=8
+
+chat: 'false'
+stream: 'true'
+ignore_eos: 'true'
+max_tokens: 1024                # math reasoning needs room

@@ -75,6 +75,68 @@ docker logs -f sglang-qwen3-nvfp4-128k   # in another shell, optional
 #   then open http://<host>:8050
 ```
 
+### Viewing the dashboard from a remote dev host (SSH port-forward)
+
+The viewer binds to `0.0.0.0:8050` by default, so once the SSH host firewall
+allows port 8050 you can just hit `http://<remote-ip>:8050`. Most shared dev
+boxes don't expose that port though — use SSH local port forwarding from
+your laptop:
+
+```bash
+# laptop → dev box, forward laptop:8050 to remote:8050
+ssh -N -L 8050:localhost:8050 user@remote-dev-host
+
+# in another laptop terminal, open the dashboard locally:
+open http://localhost:8050      # macOS
+xdg-open http://localhost:8050  # Linux
+```
+
+Add `-fN` to push the forward into the background (`ssh -fN -L ...`), or put
+it in `~/.ssh/config` so future sessions tunnel automatically:
+
+```ssh-config
+Host dev-box
+    HostName remote-dev-host
+    User you
+    LocalForward 8050 localhost:8050
+    # Optional: keep the connection alive
+    ServerAliveInterval 60
+    ServerAliveCountMax 5
+```
+
+Then `ssh dev-box` opens the tunnel for the lifetime of the session.
+
+**If port 8050 is already in use on your laptop**, map a different local
+port: `ssh -L 18050:localhost:8050 ...` and visit `http://localhost:18050`.
+
+**Multiple dashboards on one host**: launch each viewer on a distinct port
+(`python -m agent.viewer --port 8051`, `--port 8052`, ...) and forward
+multiple local-to-remote pairs in one ssh command:
+
+```bash
+ssh -N \
+    -L 8050:localhost:8050 \
+    -L 8051:localhost:8051 \
+    user@remote-dev-host
+```
+
+**Behind a corporate jump host?** Use the `-J` flag to chain:
+
+```bash
+ssh -N -J jump-host -L 8050:localhost:8050 user@remote-dev-host
+```
+
+**One-liner for impatient runs**: open the tunnel only for as long as you
+need the dashboard, then it tears down automatically when you Ctrl+C:
+
+```bash
+ssh -N -L 8050:localhost:8050 remote-dev-host &
+SSH_PID=$!
+trap "kill $SSH_PID" EXIT
+open http://localhost:8050
+wait
+```
+
 ---
 
 ## Where is TPM in the output?
