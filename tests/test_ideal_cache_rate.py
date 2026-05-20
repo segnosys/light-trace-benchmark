@@ -7,7 +7,7 @@ Anthropic's protocol semantics (1024-token min, marker-position constraints).
 
 import pytest
 
-from lightrace.analytics import estimate_ideal_cache_hit_rate
+from legacy.analytics import estimate_ideal_cache_hit_rate
 
 
 def _approx(a, b, tol=1e-6):

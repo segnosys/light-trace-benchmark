@@ -10,7 +10,7 @@ from typing import List
 import pytest
 from aiohttp import web
 
-from lightrace.engine_metrics import (
+from legacy.engine_metrics import (
     EngineMetricsPoller,
     parse_prometheus_text,
 )

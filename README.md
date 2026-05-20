@@ -1,21 +1,30 @@
-# LightTrace / optimus-agent-bench
+# agent-bench
 
-Inference endpoint benchmarking tools. **Two separate entry points**, one per
-workload shape:
+Agent workload benchmarking for inference endpoints. The headline workload
+is **multi-turn growing-prefix sessions** — what a real code/chat agent
+looks like on the wire. A classic synthetic-traffic benchmark (burst /
+concurrent / QPS) is preserved as a `legacy` reference baseline.
 
-* **`lightrace`** — `batch` mode. Open-loop / closed-loop synthetic traffic
-  (burst, concurrent, QPS). Measures raw throughput and TTFT under controlled
-  load. This is the classic LightTrace behavior. Entry point:
-  `lightrace.run:main`, console script `lightrace`.
-* **`agent/agent_throughput.py`** — agent mode. Interactive code-agent workload
-  with multi-turn sessions, growing prefixes (so a realistic fraction of each
-  request is cache-hittable), configurable human/machine wait time between
-  turns, and an optional QPS sweep wrapper at `agent/runner.py`.
+| invocation | workload shape |
+|---|---|
+| `agent-bench` (no subcommand) | same as `agent` — the default |
+| `agent-bench agent …`  | **primary** — multi-turn code-agent workload with growing prefixes (so a realistic fraction of each request is cache-hittable), configurable human/machine wait time between turns. Backed by `agent.agent_throughput:main`. |
+| `agent-bench sweep …`  | QPS sweep / SLO-driven capacity search wrapping `agent`. Backed by `agent.runner:main`. |
+| `agent-bench viewer …` | live Dash/Plotly dashboard over `benchmarks/`. Requires the `viewer` extras. Backed by `agent.viewer:main`. |
+| `agent-bench legacy …` | reference baseline — classic open/closed-loop synthetic traffic (burst, concurrent, QPS). Useful for sanity-checking a server before running the agent workload. Backed by `legacy.run:main`. |
 
-These are two distinct programs with their own CLIs. There is **no unified
-`--mode` flag** today — the README originally claimed one but the work to
-merge them isn't done. Use the table below to pick the right tool, then read
-the section that matches.
+Run `agent-bench <subcommand> --help` for that subcommand's flags. The
+workload shapes have disjoint configuration surfaces, so each subcommand
+keeps its own argument set. The `agent` subcommand has its own
+`--mode {traffic-replay,realistic,preview}` for in-mode variations.
+
+`agent-bench` is the only console script the wheel installs. If you call
+it with classic batch-style flags but no subcommand
+(`agent-bench --provider … --base_url …`), it routes to `legacy` and
+prints a one-line nudge to use `agent-bench legacy …` explicitly.
+
+Repo layout: `agent/` (primary code), `legacy/` (reference batch
+benchmark), `agentbench/` (top-level CLI dispatcher).
 
 ## Supported Backends
 
@@ -23,7 +32,7 @@ the section that matches.
 
 ### Prompt-cache reporting
 
-When the backend reports prompt-cache stats, lightrace surfaces them per request and as an aggregate:
+When the backend reports prompt-cache stats, agent-bench surfaces them per request and as an aggregate:
 
 | backend | cache fields populated | how to enable |
 |---|---|---|
@@ -49,25 +58,26 @@ pip install -e .
 Or with Docker:
 
 ```bash
-docker build -t lightrace .
+docker build -t agent-bench .
 ```
 
-This installs three console scripts:
+This installs the unified `agent-bench` console script:
 
 | command | what it does |
 |---|---|
-| `lightrace` | batch-mode entry point (open-loop / closed-loop synthetic load) |
-| `lightrace-agent` | agent-mode driver (`agent.agent_throughput:main`) — multi-turn workload with growing prefixes |
-| `lightrace-agent-sweep` | QPS-sweep wrapper around `lightrace-agent` |
+| `agent-bench` / `agent-bench agent …` | multi-turn workload with growing prefixes (primary) |
+| `agent-bench sweep …` | QPS sweep / SLO capacity search wrapping `agent` |
+| `agent-bench viewer …` | live Dash/Plotly dashboard (needs `pip install 'agent-bench[viewer]'`) |
+| `agent-bench legacy …` | classic synthetic-load reference benchmark |
 
 Two sets of pre-built workload profiles ship inside the wheel:
 
 | set | for | discover via |
 |---|---|---|
-| `lightrace/configs/*.yaml` | `lightrace --config <path>` (batch mode) | `lightrace.configs_dir()` / `lightrace.list_configs()` |
-| `agent/workloads/*.yaml` | `lightrace-agent --workload-config <path>` | `agent.workloads_dir()` / `agent.list_workloads()` |
+| `agent/workloads/*.yaml` | `agent-bench agent --workload-config <path>` | `agent.workloads_dir()` / `agent.list_workloads()` |
+| `legacy/configs/*.yaml` | `agent-bench legacy --config <path>` | `legacy.configs_dir()` / `legacy.list_configs()` |
 
-Bundled batch profiles (typical scenarios — pick one and add `--base_url`/`--model_name`):
+Bundled legacy/reference profiles (sanity baselines — pick one and add `--base_url`/`--model_name`):
 
 | name | shape | what it stresses |
 |---|---|---|
@@ -97,111 +107,45 @@ Bundled agent profiles (multi-turn shapes):
 Discover at runtime:
 
 ```python
-import lightrace, agent
-print(lightrace.configs_dir(), lightrace.list_configs())
-print(agent.workloads_dir(),   agent.list_workloads())
+import agent, legacy
+print(agent.workloads_dir(),  agent.list_workloads())
+print(legacy.configs_dir(),   legacy.list_configs())
 ```
 
 Or pass any of them by absolute path:
 
 ```bash
-lightrace --config $(python -c 'import lightrace; print(lightrace.configs_dir() / "chat_short.yaml")') \
-          --base_url http://localhost:8001/v1 \
-          --model_name your/model --tokenizer_name your/tokenizer
+agent-bench agent --workload-config $(python -c 'import agent; print(agent.workloads_dir() / "rag_oneshot.yaml")') \
+                  --server http://localhost:8001 --model your/model --tokenizer your/tokenizer
 
-lightrace-agent --workload-config $(python -c 'import agent; print(agent.workloads_dir() / "rag_oneshot.yaml")') \
-                --server http://localhost:8001 --model your/model --tokenizer your/tokenizer
+agent-bench legacy --config $(python -c 'import legacy; print(legacy.configs_dir() / "chat_short.yaml")') \
+                   --base_url http://localhost:8001/v1 \
+                   --model_name your/model --tokenizer_name your/tokenizer
 ```
 
 The legacy invocations `python3 agent/agent_throughput.py …` and
-`python3 agent/runner.py …` still work from a source checkout. The
-`optimus-agent-bench` name from earlier doc copy is **not** a registered
-script — earlier README claims of a unified `--mode` flag were aspirational.
+`python3 agent/runner.py …` still work from a source checkout.
 
 ---
 
-## Mode 1 — `batch` (entry point: `lightrace`)
-
-Synthetic traffic shaped by one of three patterns. Choose `--traffic_pattern`.
-
-### Burst
-
-Sends batched requests at a fixed concurrency level with configurable intervals
-between batches.
-
-```bash
-lightrace \
-  --provider sglang \
-  --base_url http://localhost:30000/v1 \
-  --model_name Qwen/Qwen2.5-72B-Instruct \
-  --tokenizer_name Qwen/Qwen2.5-72B-Instruct \
-  --traffic_pattern burst \
-  --concurrency 16 \
-  --max_num_burst 10 \
-  --burst_interval 0.0325 \
-  --dataset_type synthetic \
-  --synthetic_input_length 512 \
-  --synthetic_output_length 256 \
-  --num_examples 160 \
-  --num_gpus 4 \
-  --chat false --stream true --ignore_eos true
-```
-
-### Concurrent
-
-N workers, each sends a new request as soon as the previous one completes.
-
-```bash
-lightrace \
-  --traffic_pattern concurrent \
-  --concurrency 32 \
-  ...
-```
-
-### QPS
-
-Requests arrive at a target rate with configurable inter-arrival distribution.
-
-```bash
-lightrace \
-  --traffic_pattern qps \
-  --levels 4 \
-  --duration 30 \
-  --qps_distribution uniform \
-  ...
-```
-
-### Dataset Types (batch mode)
-
-| Type | Description |
-|---|---|
-| `synthetic` | Fixed-length filler prompts for controlled benchmarking |
-| `hf` | HuggingFace datasets (default: arena-hard-auto) |
-| `jsonl` | Local JSONL files or R2-hosted files |
-| `sharegpt` | ShareGPT-format conversation data |
-| `generated-shared-prefix` | Two-dataset prefix caching benchmark |
-
----
-
-## Mode 2 — agent (entry point: `agent/agent_throughput.py`)
+## Primary — `agent-bench agent` (entry point: `agent.agent_throughput:main`)
 
 Multi-turn agent workload. Sessions grow turn-by-turn so the server's prefix
 cache gets exercised the way it would in production. Two sub-modes choose
 where the turn content comes from.
 
-This mode is a separate program from `lightrace` and has its own CLI; see
-`python3 agent/agent_throughput.py --help`. The `agent/runner.py` wrapper
-sweeps QPS levels by re-invoking `agent_throughput.py`.
+See `agent-bench agent --help` for the full flag set. The `agent-bench sweep`
+wrapper sweeps QPS levels by re-invoking `agent-bench agent`.
 
 ### Sub-mode A — random / synthesized turns (default)
 
-Synthesizes turns from random ASCII or, when `LIGHTRACE_AGENT_CORPUS` is set,
-from a local code corpus. Prompt and generation lengths are sampled from
-configurable lognormal distributions.
+Synthesizes turns from random ASCII or, when `AGENT_BENCH_CORPUS` (legacy:
+`LIGHTRACE_AGENT_CORPUS`) is set, from a local code corpus. Prompt and
+generation lengths are sampled from configurable lognormal distributions.
 
 ```bash
 # After pip install:
-lightrace-agent \
+agent-bench agent \
   --server http://localhost:8001 \
   --model qwen3-30b-a3b-nvfp4 \
   --tokenizer Qwen/Qwen3-30B-A3B \
@@ -319,9 +263,74 @@ CLI flag  >  workload YAML  >  code default
 
 ---
 
+## Reference baseline — `agent-bench legacy` (entry point: `legacy.run:main`)
+
+The classic synthetic-traffic benchmark, kept around as a sanity-check
+baseline before the agent workload. Traffic is shaped by one of three
+patterns; choose `--traffic_pattern`.
+
+### Burst
+
+Sends batched requests at a fixed concurrency level with configurable intervals
+between batches.
+
+```bash
+agent-bench legacy \
+  --provider sglang \
+  --base_url http://localhost:30000/v1 \
+  --model_name Qwen/Qwen2.5-72B-Instruct \
+  --tokenizer_name Qwen/Qwen2.5-72B-Instruct \
+  --traffic_pattern burst \
+  --concurrency 16 \
+  --max_num_burst 10 \
+  --burst_interval 0.0325 \
+  --dataset_type synthetic \
+  --synthetic_input_length 512 \
+  --synthetic_output_length 256 \
+  --num_examples 160 \
+  --num_gpus 4 \
+  --chat false --stream true --ignore_eos true
+```
+
+### Concurrent
+
+N workers, each sends a new request as soon as the previous one completes.
+
+```bash
+agent-bench legacy \
+  --traffic_pattern concurrent \
+  --concurrency 32 \
+  ...
+```
+
+### QPS
+
+Requests arrive at a target rate with configurable inter-arrival distribution.
+
+```bash
+agent-bench legacy \
+  --traffic_pattern qps \
+  --levels 4 \
+  --duration 30 \
+  --qps_distribution uniform \
+  ...
+```
+
+### Dataset Types (legacy mode)
+
+| Type | Description |
+|---|---|
+| `synthetic` | Fixed-length filler prompts for controlled benchmarking |
+| `hf` | HuggingFace datasets (default: arena-hard-auto) |
+| `jsonl` | Local JSONL files or R2-hosted files |
+| `sharegpt` | ShareGPT-format conversation data |
+| `generated-shared-prefix` | Two-dataset prefix caching benchmark |
+
+---
+
 ## Benchmark Results
 
-### Qwen2.5-72B-Instruct on 4x NVIDIA B200 (SGLang, TP=4) — batch mode
+### Qwen2.5-72B-Instruct on 4x NVIDIA B200 (SGLang, TP=4) — legacy mode
 
 Input: 512 tokens, Output: 256 tokens, Synthetic dataset
 
@@ -331,7 +340,7 @@ Input: 512 tokens, Output: 256 tokens, Synthetic dataset
 | concurrent | 32 | 128 | 0 | 77.9 | 779 | 974 | 1,982 |
 | qps | 4.0 | 120 | 0 | 80.5 | 50 | 396 | 950 |
 
-### Qwen2.5-7B-Instruct on 1x NVIDIA B200 (SGLang) — batch mode
+### Qwen2.5-7B-Instruct on 1x NVIDIA B200 (SGLang) — legacy mode
 
 Input: 128 tokens, Output: 128 tokens, Synthetic dataset
 
@@ -417,20 +426,20 @@ See `agent/README.md` for the full SSH port-forward recipes (including
 ### YAML Config
 
 ```bash
-lightrace --config my_benchmark.yaml
+agent-bench legacy --config my_benchmark.yaml
 ```
 
 ### W&B Tracking
 
 ```bash
-lightrace --wandb_enabled true --wandb_project my-project \
+agent-bench legacy --wandb_enabled true --wandb_project my-project \
   --wandb_tags "70b,sglang,burst"
 ```
 
-### LoRA Benchmarking (batch mode)
+### LoRA Benchmarking (legacy mode)
 
 ```bash
-lightrace \
+agent-bench legacy \
   --adapter_paths "s3://bucket/lora1,s3://bucket/lora2" \
   --lora_ratio 0.5 \
   --lora_distribution round_robin \
@@ -442,17 +451,17 @@ lightrace \
 Attach custom metadata columns to the CSV output:
 
 ```bash
-lightrace --extra-server us-east-1 --extra-gpu-type b200 ...
+agent-bench legacy --extra-server us-east-1 --extra-gpu-type b200 ...
 ```
 
-### Multi-Level Sweeps (batch mode)
+### Multi-Level Sweeps (legacy mode)
 
 ```bash
-lightrace --traffic_pattern burst --levels "4,8,16,32" ...
-lightrace --traffic_pattern qps --levels "1,2,4,8" --duration 60 ...
+agent-bench legacy --traffic_pattern burst --levels "4,8,16,32" ...
+agent-bench legacy --traffic_pattern qps --levels "1,2,4,8" --duration 60 ...
 ```
 
-For agent mode, use `agent/runner.py` for QPS sweeps and SLO-driven binary
+For agent mode, use `agent-bench sweep` for QPS sweeps and SLO-driven binary
 search; see `agent/README.md`.
 
 ---

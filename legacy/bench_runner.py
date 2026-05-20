@@ -1,14 +1,14 @@
 from typing import List, Optional, Tuple
 
-from lightrace import REGISTERED_BACKENDS
-from lightrace.load_driver import (
+from legacy import REGISTERED_BACKENDS
+from legacy.load_driver import (
     BatchedDriver,
     LoadDriver,
     OpenLoopBurstDriver,
     ParallelWorkerDriver,
     RateBasedDriver,
 )
-from lightrace.schema import InferencePayload, ResultEntry
+from legacy.schema import InferencePayload, ResultEntry
 
 
 class InferenceBenchRunner:

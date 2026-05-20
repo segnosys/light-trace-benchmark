@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from lightrace.backends import AnthropicBackend
-from lightrace.schema import InferencePayload
+from legacy.backends import AnthropicBackend
+from legacy.schema import InferencePayload
 
 
 @pytest.fixture

@@ -447,7 +447,7 @@ def create_dash_app(data_dir: Path = Path("benchmarks")) -> Dash:
                 html.Code(_data_dir_str),
                 html.Br(),
                 html.Span(
-                    f"Launch a run with `lightrace-agent --data-dir {_data_dir_str} ...` "
+                    f"Launch a run with `agent-bench agent --data-dir {_data_dir_str} ...` "
                     "and the dashboard will pick it up automatically. The viewer scans for "
                 ),
                 html.Code("<name>/<YYYY-MM-DD-HH-MM-SS>/metrics.jsonl"),

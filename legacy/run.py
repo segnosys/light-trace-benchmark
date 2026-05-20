@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 import jsonargparse
 import numpy as np
 
-from lightrace.cli_options import (
+from legacy.cli_options import (
     adapter_options,
     batch_mode_options,
     backend_options,
@@ -25,16 +25,16 @@ from lightrace.cli_options import (
     synthetic_data_options,
     tracking_options,
 )
-from lightrace.input_pipeline import InputPipeline
-from lightrace.bench_runner import InferenceBenchRunner
-from lightrace.analytics import (
+from legacy.input_pipeline import InputPipeline
+from legacy.bench_runner import InferenceBenchRunner
+from legacy.analytics import (
     estimate_ideal_cache_hit_rate,
     export_report_csv,
     render_report,
     summarize_benchmark,
 )
-from lightrace.engine_metrics import EngineMetricsPoller
-from lightrace.experiment_tracker import (
+from legacy.engine_metrics import EngineMetricsPoller
+from legacy.experiment_tracker import (
     ExperimentTracker,
     capture_invocation,
     split_tag_string,
@@ -88,7 +88,7 @@ def _extract_extra_eval_metadata(
 
 
 def main(argv: List[str] | None = None):
-    parser = jsonargparse.ArgumentParser(prog="LightRace Inference Benchmark")
+    parser = jsonargparse.ArgumentParser(prog="agent-bench batch")
     backend_options(parser)
     inference_request_options(parser)
     load_pattern_options(parser)

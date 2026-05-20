@@ -1,7 +1,7 @@
 """Build a tokenized agent-style corpus: real code (sglang fork) + a small mix
 of natural-language explanations. Saved as a JSON list of (kind, path, tokens).
 
-Run once; consumers (lightrace) load the JSON and slice deterministically.
+Run once; consumers (agent-bench) load the JSON and slice deterministically.
 
 Usage:
     python3 build_agent_corpus.py \

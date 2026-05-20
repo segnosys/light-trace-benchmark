@@ -3,8 +3,8 @@ Tests for the OpenAI / sglang / vllm cache-token parsing path:
 `usage.prompt_tokens_details.cached_tokens` ends up on
 FragmentInfo.cached_input_tokens and ultimately on LatencyProfile.
 """
-from lightrace.backends import OpenAIBackend, SGLangBackend
-from lightrace.schema import InferencePayload
+from legacy.backends import OpenAIBackend, SGLangBackend
+from legacy.schema import InferencePayload
 
 
 def _chat_request():

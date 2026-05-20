@@ -12,9 +12,9 @@ from typing import List
 
 import pytest
 
-from lightrace.backends import BaseBackend
-from lightrace.load_driver import BatchedDriver, OpenLoopBurstDriver
-from lightrace.schema import InferencePayload, LatencyProfile, ResultEntry
+from legacy.backends import BaseBackend
+from legacy.load_driver import BatchedDriver, OpenLoopBurstDriver
+from legacy.schema import InferencePayload, LatencyProfile, ResultEntry
 
 
 class _SlowFakeBackend(BaseBackend):

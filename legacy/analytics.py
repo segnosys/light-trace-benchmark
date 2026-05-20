@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from tabulate import SEPARATING_LINE, tabulate
 
-from lightrace.schema import (
+from legacy.schema import (
     BenchmarkReport,
     BackendInfo,
     DeviceThroughput,
@@ -180,12 +180,16 @@ def estimate_ideal_cache_hit_rate(
     # Anthropic Sonnet/Haiku won't cache chunks below 1024 tokens; Opus is 2048.
     # The estimator can't peek at model_name from this signature, so default to
     # 1024. Callers wanting the Opus threshold can override via the env var
-    # LIGHTRACE_ANTHROPIC_MIN_CACHEABLE — kept as escape hatch rather than yet
-    # another argument; the Opus-aware logic lives on AnthropicBackend itself.
+    # AGENT_BENCH_ANTHROPIC_MIN_CACHEABLE (legacy: LIGHTRACE_ANTHROPIC_MIN_CACHEABLE).
+    # Kept as an escape hatch rather than yet another argument; the Opus-aware
+    # logic lives on AnthropicBackend itself.
     import os as _os
+    _override = (
+        _os.environ.get("AGENT_BENCH_ANTHROPIC_MIN_CACHEABLE")
+        or _os.environ.get("LIGHTRACE_ANTHROPIC_MIN_CACHEABLE")
+    )
     anthropic_min_cacheable = (
-        int(_os.environ.get("LIGHTRACE_ANTHROPIC_MIN_CACHEABLE", 1024))
-        if provider == "anthropic" else 0
+        int(_override) if (provider == "anthropic" and _override) else (1024 if provider == "anthropic" else 0)
     )
 
     # Case 1: identical prompts repeated -> trivially cacheable

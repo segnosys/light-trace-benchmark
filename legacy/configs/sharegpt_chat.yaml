@@ -1,6 +1,6 @@
 # Workload: ShareGPT-style multi-turn chat prompts
 #
-# Uses lightrace's sharegpt path (sample_random_requests with the model's
+# Uses agent-bench's sharegpt path (sample_random_requests with the model's
 # own tokenizer) to produce prompts of the target length. Good for chatbot
 # serving baselines when you don't want HF dataset auth.
 #

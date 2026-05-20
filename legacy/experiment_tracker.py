@@ -11,7 +11,7 @@ except ImportError:
     TRACKER_AVAILABLE = False
     wandb = None
 
-from lightrace.schema import BenchmarkReport
+from legacy.schema import BenchmarkReport
 
 
 class ExperimentTracker:
@@ -22,7 +22,7 @@ class ExperimentTracker:
     def __init__(
         self,
         enabled: bool = False,
-        project: str = "lightrace",
+        project: str = "agent-bench",
         entity: Optional[str] = None,
         tags: Optional[List[str]] = None,
         notes: Optional[str] = None,
@@ -121,7 +121,7 @@ class ExperimentTracker:
         sanitized = filename.replace(" ", "_").replace("/", "_").replace("\\", "_")
 
         if not sanitized:
-            sanitized = "lightrace_run"
+            sanitized = "agent_bench_run"
 
         return sanitized
 

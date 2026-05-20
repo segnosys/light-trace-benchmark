@@ -4,17 +4,28 @@ with open("README.md", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="lightrace",
+    name="agent-bench",
     version="0.0.1",
-    description="LightRace Inference Benchmark",
+    description=(
+        "agent-bench: agent workload benchmarking for inference endpoints. "
+        "Multi-turn growing-prefix sessions are the primary mode; classic "
+        "synthetic-traffic benchmarking lives under the `legacy` subcommand "
+        "as a reference baseline."
+    ),
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(include=["lightrace", "lightrace.*", "agent", "agent.*"]),
-    # Bundle the workload YAMLs so `pip install lightrace` (no git clone) still
-    # ships them — addresses the wheel-only-has-batch bug.
+    # Three Python packages ship: `agent` (primary), `legacy` (classic
+    # synthetic-load reference), `agentbench` (top-level CLI dispatcher).
+    packages=find_packages(include=[
+        "agent", "agent.*",
+        "legacy", "legacy.*",
+        "agentbench", "agentbench.*",
+    ]),
+    # Bundle workload YAMLs so `pip install agent-bench` (no git clone) still
+    # ships them.
     package_data={
         "agent": ["workloads/*.yaml"],
-        "lightrace": ["configs/*.yaml"],
+        "legacy": ["configs/*.yaml"],
     },
     include_package_data=True,
     python_requires=">=3.10",
@@ -39,12 +50,12 @@ setup(
         "pybase64",
         # Previously: sglang==0.5.2. Removed — the two helpers we used
         # (get_tokenizer, sample_random_requests) are now vendored in
-        # lightrace/_sglang_compat.py to avoid downgrading the server's sglang.
+        # legacy/_sglang_compat.py to avoid downgrading the server's sglang.
     ],
     extras_require={
         # Optional Dash/Plotly viewer for agent-mode runs. Not pulled into
-        # the base install so a `pip install lightrace` of just the bench
-        # client stays small. Install with `pip install 'lightrace[viewer]'`.
+        # the base install so a `pip install agent-bench` of just the bench
+        # client stays small. Install with `pip install 'agent-bench[viewer]'`.
         "viewer": [
             "dash>=2.0.0",
             "plotly>=5.0.0",
@@ -63,15 +74,13 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "lightrace = lightrace.run:main",
-            # Agent mode (multi-turn / code-agent workload). Was previously
-            # only reachable via `python3 agent/agent_throughput.py` from a
-            # git clone — now installable via pip too.
-            "lightrace-agent = agent.agent_throughput:main",
-            "lightrace-agent-sweep = agent.runner:main",
-            # Live Dash/Plotly viewer over `metrics.jsonl`. Requires the
-            # `viewer` extras: `pip install 'lightrace[viewer]'`.
-            "lightrace-viewer = agent.viewer:main",
+            # Single unified entry point — dispatches to subcommands:
+            #   agent-bench                 default → agent mode
+            #   agent-bench agent  …        multi-turn growing-prefix workload
+            #   agent-bench sweep  …        QPS sweep / SLO capacity search
+            #   agent-bench viewer …        live Dash/Plotly dashboard
+            #   agent-bench legacy …        classic synthetic-load benchmark
+            "agent-bench = agentbench.cli:main",
         ],
     },
 )

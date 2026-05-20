@@ -6,11 +6,11 @@ from typing import List, Optional
 
 import datasets
 import numpy as np
-from lightrace._sglang_compat import get_tokenizer, sample_random_requests
+from legacy._sglang_compat import get_tokenizer, sample_random_requests
 from together import Together
 from tqdm import tqdm
 
-from lightrace.schema import InferencePayload
+from legacy.schema import InferencePayload
 
 FILLER_TOKEN_PHRASE: str = "hi,"
 FILLER_TOKEN_COUNT: int = 2

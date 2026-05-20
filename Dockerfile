@@ -11,7 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY setup.py .
 COPY pyproject.toml .
 COPY README.md .
-COPY lightrace/ ./lightrace/
+COPY agent/ ./agent/
+COPY legacy/ ./legacy/
+COPY agentbench/ ./agentbench/
 
 # Install the package with development dependencies
 RUN pip install --no-cache-dir -e "."

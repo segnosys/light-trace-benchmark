@@ -1,8 +1,8 @@
 """
 Tests for the cache-rate aggregation helpers in analytics.
 """
-from lightrace.analytics import _extract_cache_hit_rate, _sum_cached_input_tokens
-from lightrace.schema import LatencyProfile, ResultEntry
+from legacy.analytics import _extract_cache_hit_rate, _sum_cached_input_tokens
+from legacy.schema import LatencyProfile, ResultEntry
 
 
 def _r(*, prompt, cached):

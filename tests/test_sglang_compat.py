@@ -1,5 +1,5 @@
 """
-Tests for the vendored sglang helpers (lightrace/_sglang_compat.py) — the
+Tests for the vendored sglang helpers (legacy/_sglang_compat.py) — the
 ones that replaced the sglang==0.5.2 pin that was downgrading server-side
 sglang on every install.
 """
@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from lightrace import _sglang_compat as compat
+from legacy import _sglang_compat as compat
 
 
 def test_get_tokenizer_uses_local_files_only_for_abs_paths(tmp_path):
@@ -74,7 +74,7 @@ def test_sample_random_requests_honors_input_length():
 
 
 def test_sample_random_requests_rejects_unsupported_flags():
-    """The shim only mirrors the call shape lightrace actually uses."""
+    """The shim only mirrors the call shape legacy.input_pipeline actually uses."""
     with pytest.raises(ValueError):
         compat.sample_random_requests(
             input_len=10, output_len=5, num_prompts=1,

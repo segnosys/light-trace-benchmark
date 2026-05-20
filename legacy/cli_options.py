@@ -504,7 +504,7 @@ def tracking_options(parser: ArgumentParser) -> None:
     grp.add_argument(
         "--wandb_project",
         type=str,
-        default="lightrace",
+        default="agent-bench",
         help="W&B project name.",
     )
     grp.add_argument(

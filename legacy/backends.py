@@ -9,7 +9,7 @@ import aiohttp
 import orjson
 from transformers import AutoTokenizer
 
-from lightrace.schema import (
+from legacy.schema import (
     FragmentInfo,
     InferencePayload,
     LatencyProfile,
