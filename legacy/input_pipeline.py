@@ -27,6 +27,108 @@ DEFAULT_SUFFIX_DATASET_COLUMN = "problem"
 DEFAULT_SUFFIX_DATASET_SPLIT = "test"
 
 
+def _trial_to_messages(trial) -> Optional[List[dict]]:
+    """Convert one sharegpt-style trial into an OpenAI-style
+    ``messages`` list, or return None if the trial is malformed
+    in a way we can't replay (multimodal entries, unknown role
+    strings, assistant-led conversations, etc.).
+
+    Role mapping: ``human`` → ``user``, ``gpt`` → ``assistant``.
+    The trace format predates standardized OpenAI roles; the
+    mapping comes from inspecting actual datasets (e.g. the
+    Inferact/codex_swebenchpro_traces dump on HuggingFace).
+
+    Trailing assistant turns are trimmed so the last message is
+    always a user turn — the replay sends each user message as
+    the final input asking the engine to generate the next
+    assistant response.
+    """
+    if not isinstance(trial, dict):
+        return None
+    convs = trial.get("conversations")
+    if not isinstance(convs, list) or not convs:
+        return None
+
+    messages: List[dict] = []
+    for entry in convs:
+        if not isinstance(entry, dict):
+            return None
+        from_field = entry.get("from")
+        value = entry.get("value")
+        if not isinstance(value, str):
+            return None
+        if from_field == "human":
+            role = "user"
+        elif from_field == "gpt":
+            role = "assistant"
+        else:
+            # Unknown role (system, tool, function, ...). Don't guess;
+            # we want a known regression signal, not silent garbage.
+            return None
+        messages.append({"role": role, "content": value})
+
+    if not messages or messages[0]["role"] != "user":
+        return None
+
+    while messages and messages[-1]["role"] == "assistant":
+        messages.pop()
+    if not messages:
+        return None
+    return messages
+
+
+def _cap_user_turns(messages: List[dict], max_user_turns: int) -> List[dict]:
+    """Truncate `messages` to at most `max_user_turns` user turns,
+    always ending on a user turn so the replay's "ask engine to
+    produce the next assistant reply" framing still holds."""
+    if max_user_turns <= 0:
+        return messages
+    user_count = 0
+    end = 0
+    for i, m in enumerate(messages):
+        if m["role"] == "user":
+            user_count += 1
+            if user_count > max_user_turns:
+                break
+        end = i + 1
+    capped = messages[:end]
+    while capped and capped[-1]["role"] == "assistant":
+        capped.pop()
+    return capped
+
+
+def _select_trials_by_strategy(
+    trials: List[List[dict]],
+    n: Optional[int],
+    strategy: str,
+    seed: int,
+) -> List[List[dict]]:
+    """Pick a subset of `trials` per the chosen strategy. If `n`
+    is None, return all of them in original order. The strategy
+    determines both the *which* and the *order*: ``smallest`` /
+    ``largest`` sort by total content bytes; ``random`` does a
+    seeded shuffle; ``first`` preserves dataset order (the cheap
+    fully-deterministic option that doesn't need a seed)."""
+    if not trials:
+        return []
+    sized = [(sum(len(m["content"]) for m in t), t) for t in trials]
+    if strategy == "smallest":
+        sized.sort(key=lambda x: x[0])
+    elif strategy == "largest":
+        sized.sort(key=lambda x: -x[0])
+    elif strategy == "random":
+        rng = random.Random(seed)
+        rng.shuffle(sized)
+    elif strategy == "first":
+        pass
+    else:
+        raise ValueError(f"unknown trace_replay_strategy {strategy!r}")
+    picked = [t for _, t in sized]
+    if n is not None:
+        picked = picked[:n]
+    return picked
+
+
 def replicate_inputs_per_batch(
     requests: List[InferencePayload], concurrency: int
 ) -> List[InferencePayload]:
@@ -66,6 +168,11 @@ class InputPipeline:
         jsonl_convert_to_chat_request_format: Optional[bool] = None,
         jsonl_r2_file_ids: Optional[str] = None,
         jsonl_r2_download_dir: Optional[str] = None,
+        trace_replay_input_path: Optional[str] = None,
+        trace_replay_num_trials: Optional[int] = None,
+        trace_replay_strategy: str = "first",
+        trace_replay_max_turns_per_trial: int = 0,
+        trace_replay_seed: int = 42,
         together_api_key: Optional[str] = None,
         synthetic_input_length: Optional[int] = None,
         synthetic_output_length: Optional[int] = None,
@@ -111,6 +218,11 @@ class InputPipeline:
         self.jsonl_convert_to_chat_request_format = jsonl_convert_to_chat_request_format
         self.jsonl_r2_file_ids = jsonl_r2_file_ids
         self.jsonl_r2_download_dir = jsonl_r2_download_dir
+        self.trace_replay_input_path = trace_replay_input_path
+        self.trace_replay_num_trials = trace_replay_num_trials
+        self.trace_replay_strategy = trace_replay_strategy
+        self.trace_replay_max_turns_per_trial = trace_replay_max_turns_per_trial
+        self.trace_replay_seed = trace_replay_seed
         self.together_api_key = together_api_key
         self.synthetic_input_length = synthetic_input_length
         self.synthetic_output_length = synthetic_output_length
@@ -219,11 +331,28 @@ class InputPipeline:
             all_requests = self._build_sharegpt_inputs()
         elif self.dataset_type == "generated-shared-prefix":
             all_requests = self._build_shared_prefix_inputs()
+        elif self.dataset_type == "trace-replay":
+            all_requests = self._build_trace_replay_inputs()
         else:
             raise ValueError("No dataset specified")
 
-        if self.same_prompts_in_burst and self.dataset_type != "generated-shared-prefix":
+        # Burst-duplication is for synthetic batch-timing experiments;
+        # it would destroy the growing-prefix ordering that gives
+        # trace-replay its whole point, so we skip it there too.
+        skip_burst_replicate = self.dataset_type in (
+            "generated-shared-prefix",
+            "trace-replay",
+        )
+        if self.same_prompts_in_burst and not skip_burst_replicate:
             all_requests = replicate_inputs_per_batch(all_requests, self.concurrency)
+
+        # trace-replay's request count is determined by the corpus
+        # itself (sum of user turns across selected trials), so
+        # `--num_examples` is informational rather than load-bearing.
+        # Set it to the actual count if the user didn't pin a value;
+        # otherwise require equality the same as every other mode.
+        if self.dataset_type == "trace-replay" and self.num_examples is None:
+            self.num_examples = len(all_requests)
 
         assert (
             len(all_requests) == self.num_examples
@@ -435,6 +564,118 @@ class InputPipeline:
 
             request = InferencePayload(**request_kwargs)
             all_requests.append(request)
+
+        return all_requests
+
+    # ------------------------------------------------------------------
+    # trace-replay
+    # ------------------------------------------------------------------
+
+    def _build_trace_replay_inputs(self) -> List[InferencePayload]:
+        """Expand a sharegpt-style trace file into one request per
+        user turn, with growing prefix.
+
+        Input file shape::
+
+            [
+              {"conversations": [
+                {"from": "human", "value": "..."},
+                {"from": "gpt",   "value": "..."},
+                {"from": "human", "value": "..."},
+                ...
+              ]},
+              ...
+            ]
+
+        Each trial becomes K requests where K = number of user
+        turns in the trial. The N-th request carries
+        ``messages[:N*2-1]`` — every turn up to and including the
+        N-th user message — so the engine sees a growing-prefix
+        chat history exactly as it would have during the original
+        agent loop. This is what reproduces the dataset's
+        cross-request prefix-cache pattern in serving.
+
+        Determinism: a given (file, num_trials, strategy, max_turns,
+        seed) tuple always produces the same ordered list of
+        requests. We do not consume any wall-clock or process-state
+        randomness. Cross-restart cache replay (Phase 1 fills the
+        store, restart, Phase 2 reads from store) therefore actually
+        works — which the synthetic modes can't promise once you
+        chain model output back into prompts.
+        """
+        if not self.trace_replay_input_path:
+            raise ValueError(
+                "trace-replay needs --trace_replay_input_path "
+                "(a JSON file in sharegpt schema)."
+            )
+        if not self.chat:
+            # We send messages= lists, not a flat prompt string;
+            # backends that don't speak chat can't handle this mode.
+            raise ValueError(
+                "trace-replay requires --chat=true (it sends "
+                "growing-prefix chat histories)."
+            )
+
+        with open(self.trace_replay_input_path) as f:
+            raw_trials = json.load(f)
+        if not isinstance(raw_trials, list):
+            raise ValueError(
+                f"trace-replay input must be a JSON list of trials; "
+                f"got {type(raw_trials).__name__}"
+            )
+
+        # Convert + validate every trial up front; drop the ones
+        # whose shape doesn't fit (multimodal, assistant-led, empty).
+        # Same filtering as bench.deterministic_l3.corpus_swebench in
+        # RocServe — kept structurally consistent so a corpus emitted
+        # there can be replayed here without conversion.
+        converted: List[List[dict]] = []
+        for trial in raw_trials:
+            messages = _trial_to_messages(trial)
+            if messages:
+                converted.append(messages)
+
+        # Select num_trials by strategy
+        chosen = _select_trials_by_strategy(
+            converted,
+            n=self.trace_replay_num_trials,
+            strategy=self.trace_replay_strategy,
+            seed=self.trace_replay_seed,
+        )
+
+        # Cap per-trial turns
+        if self.trace_replay_max_turns_per_trial > 0:
+            chosen = [
+                _cap_user_turns(msgs, self.trace_replay_max_turns_per_trial)
+                for msgs in chosen
+            ]
+
+        # Expand each trial into per-user-turn requests
+        all_requests: List[InferencePayload] = []
+        idx = 0
+        for messages in chosen:
+            # Find user-turn positions; the K-th request sends
+            # everything from messages[0] up to and including the
+            # K-th user message.
+            user_positions = [i for i, m in enumerate(messages) if m["role"] == "user"]
+            for u_pos in user_positions:
+                prefix = messages[: u_pos + 1]
+                adapter_path, lora_name = self._pick_adapter_for_request(idx)
+                all_requests.append(
+                    InferencePayload(
+                        messages=prefix,
+                        stream=self.stream,
+                        max_tokens=self.max_tokens,
+                        skip_eos=self.skip_eos,
+                        temperature=self.temperature,
+                        top_p=self.top_p,
+                        reasoning_effort=self.reasoning_effort,
+                        reasoning=self.reasoning,
+                        adapter_path=adapter_path,
+                        lora_name=lora_name,
+                    )
+                )
+                idx += 1
 
         return all_requests
 

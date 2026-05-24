@@ -183,8 +183,21 @@ def data_source_options(parser: ArgumentParser) -> None:
         "--dataset_type",
         type=str,
         default="hf",
-        choices=["hf", "jsonl", "synthetic", "sharegpt", "generated-shared-prefix"],
-        help="Type of dataset to use.",
+        choices=[
+            "hf",
+            "jsonl",
+            "synthetic",
+            "sharegpt",
+            "generated-shared-prefix",
+            "trace-replay",
+        ],
+        help=(
+            "Type of dataset to use. `trace-replay` consumes a sharegpt-style "
+            "JSON file (list of `{conversations: [{from, value}, ...]}`) and "
+            "expands each trial into one request per user turn with the "
+            "preceding history as context — see "
+            "`trace_replay_data_options` for the input controls."
+        ),
     )
     grp.add_argument(
         "--num_examples",
@@ -303,6 +316,67 @@ def jsonl_data_options(parser: ArgumentParser) -> None:
         type=str,
         default="false",
         help="Set flag to use temperature and top_p from jsonl args.",
+    )
+
+
+def trace_replay_data_options(parser: ArgumentParser) -> None:
+    """Options for the `trace-replay` dataset type.
+
+    The bench reads a sharegpt-style JSON file — top-level list of
+    `{"conversations": [{"from": "human"|"gpt", "value": str}, ...]}`
+    entries — and expands each trial into one Request per user turn,
+    where the K-th request carries the first K user / assistant
+    pairs as a growing-prefix chat history.
+
+    The replay is **deterministic** by design: the same input file
+    with the same selection knobs always produces the same request
+    ordering, so cross-restart KV-cache experiments work. Use this
+    mode when you need real recorded agent traces (e.g. SWE-bench)
+    rather than synthetic seeded filler from `agent_throughput.py`.
+    """
+    grp = parser.add_argument_group("Trace replay dataset configurations")
+    grp.add_argument(
+        "--trace_replay_input_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a JSON file containing recorded conversations in the "
+            "sharegpt schema (list of `{conversations: [{from, value}, ...]}`). "
+            "Required when --dataset_type=trace-replay."
+        ),
+    )
+    grp.add_argument(
+        "--trace_replay_num_trials",
+        type=int,
+        default=None,
+        help=(
+            "Limit the corpus to N trials. Default (None) keeps every trial "
+            "after filtering for valid shape; can blow up to many GB of "
+            "prefill on large datasets (e.g. the 610-trial SWE-bench dump "
+            "is ~210 MB on disk but ~1.4 B prefill tokens when fully replayed)."
+        ),
+    )
+    grp.add_argument(
+        "--trace_replay_strategy",
+        type=str,
+        default="first",
+        choices=["smallest", "largest", "random", "first"],
+        help=(
+            "How to pick `trace_replay_num_trials` out of all valid trials. "
+            "`smallest` minimizes bench wall-time, `largest` maximizes KV "
+            "pressure, `random` (seeded by --random_seed) gives an unbiased "
+            "sample, `first` preserves the file's natural ordering."
+        ),
+    )
+    grp.add_argument(
+        "--trace_replay_max_turns_per_trial",
+        type=int,
+        default=0,
+        help=(
+            "Cap on user turns kept per trial. 0 (default) = no cap. Set to "
+            "bound the replay budget when a few trials in the corpus have "
+            "100+ turns."
+        ),
     )
 
 

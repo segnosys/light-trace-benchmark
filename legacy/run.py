@@ -23,6 +23,7 @@ from legacy.cli_options import (
     rate_mode_options,
     shared_prefix_data_options,
     synthetic_data_options,
+    trace_replay_data_options,
     tracking_options,
 )
 from legacy.input_pipeline import InputPipeline
@@ -99,6 +100,7 @@ def main(argv: List[str] | None = None):
     jsonl_data_options(parser)
     synthetic_data_options(parser)
     shared_prefix_data_options(parser)
+    trace_replay_data_options(parser)
     output_options(parser)
     tracking_options(parser)
     adapter_options(parser)
@@ -210,6 +212,11 @@ def main(argv: List[str] | None = None):
         ),
         jsonl_r2_file_ids=args.jsonl_r2_file_ids,
         jsonl_r2_download_dir=args.jsonl_r2_download_dir,
+        trace_replay_input_path=args.trace_replay_input_path,
+        trace_replay_num_trials=args.trace_replay_num_trials,
+        trace_replay_strategy=args.trace_replay_strategy,
+        trace_replay_max_turns_per_trial=args.trace_replay_max_turns_per_trial,
+        trace_replay_seed=args.random_seed,
         together_api_key=args.together_api_key,
         hf_dataset=args.hf_dataset,
         hf_dataset_split=args.hf_dataset_split,
