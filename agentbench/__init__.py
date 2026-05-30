@@ -6,5 +6,4 @@ Routes to:
     agent-bench agent  …      -> agent.agent_throughput.main
     agent-bench sweep  …      -> agent.runner.main
     agent-bench viewer …      -> agent.viewer.main
-    agent-bench legacy …      -> legacy.run.main               (classic batch / vllm-bench-style load)
 """

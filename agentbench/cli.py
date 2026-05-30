@@ -1,10 +1,7 @@
 """Unified `agent-bench` entry point.
 
-This tool is primarily an **agent benchmark** — multi-turn growing-prefix
-workloads against an inference endpoint. The classic synthetic-traffic
-benchmark (open/closed-loop burst / concurrent / QPS) lives under the
-`legacy` subcommand and is intentionally de-emphasized: it's kept as a
-reference baseline, not the headline use case.
+This tool is an **agent benchmark** — multi-turn growing-prefix workloads
+against an inference endpoint.
 
 Subcommand routing:
 
@@ -12,11 +9,6 @@ Subcommand routing:
     agent-bench agent  …         -> agent.agent_throughput.main
     agent-bench sweep  …         -> agent.runner.main             (QPS sweep around agent)
     agent-bench viewer …         -> agent.viewer.main             (live dashboard)
-    agent-bench legacy …         -> legacy.run.main               (classic vllm-bench-style)
-
-The bare flag form `agent-bench --provider … --base_url …` (no subcommand
-but with classic batch-style flags) routes to `legacy` as a courtesy for
-scripts that haven't been migrated yet.
 """
 from __future__ import annotations
 
@@ -24,18 +16,17 @@ import sys
 from typing import List, Sequence
 
 
-SUBCOMMANDS = ("agent", "sweep", "viewer", "legacy")
+SUBCOMMANDS = ("agent", "sweep", "viewer")
 
 
 def _print_usage() -> None:
     print(
-        "usage: agent-bench [{agent,sweep,viewer,legacy}] [args...]\n"
+        "usage: agent-bench [{agent,sweep,viewer}] [args...]\n"
         "\n"
         "  (no subcommand)    same as `agent` — the default mode\n"
         "  agent              multi-turn agent workload with growing prefixes\n"
         "  sweep              QPS sweep / SLO capacity search wrapping `agent`\n"
         "  viewer             live Dash/Plotly dashboard over benchmarks/\n"
-        "  legacy             classic synthetic-load benchmark (reference baseline)\n"
         "\n"
         "Run `agent-bench <subcommand> --help` for that subcommand's flags.",
         file=sys.stderr,
@@ -44,15 +35,9 @@ def _print_usage() -> None:
 
 def _dispatch(subcommand: str, rest: Sequence[str]) -> None:
     """Invoke the chosen subcommand's main() with `rest` as its argv."""
-    if subcommand == "legacy":
-        from legacy.run import main as _main
-        # legacy.run.main accepts argv explicitly — no sys.argv rewrite needed.
-        _main(list(rest))
-        return
-
-    # The other three mains read sys.argv directly. Rewrite it so they see only
-    # their own args, then restore on the way out so re-invocation in-process
-    # stays clean (matters for tests).
+    # The mains read sys.argv directly. Rewrite it so they see only their own
+    # args, then restore on the way out so re-invocation in-process stays clean
+    # (matters for tests).
     saved_argv = sys.argv
     sys.argv = [f"agent-bench {subcommand}", *rest]
     try:
@@ -87,17 +72,10 @@ def main(argv: List[str] | None = None) -> None:
         _dispatch(head, args[1:])
         return
 
-    # Soft fallback: someone called `agent-bench --provider … --base_url …`
-    # with classic batch-style flags but no subcommand. Route to `legacy` so
-    # the call still does something useful, and nudge them toward the
-    # explicit subcommand for next time.
+    # Bare flag form `agent-bench --server … --model …` with no subcommand —
+    # treat the flags as `agent` args, since that's the default mode.
     if head.startswith("-"):
-        print(
-            "agent-bench: note: routing to `legacy` — "
-            "use `agent-bench legacy …` explicitly going forward.",
-            file=sys.stderr,
-        )
-        _dispatch("legacy", args)
+        _dispatch("agent", args)
         return
 
     print(f"agent-bench: unknown subcommand {head!r}", file=sys.stderr)

@@ -543,6 +543,48 @@ a target arrivals rate. Requires `think_time_*`, `session_lifetime_*`,
 `max_sessions`, and `session_abandon_rate` in the YAML — see the flags in
 `agent_throughput.py --help`.
 
+### Dataset replay mode (real agent traces)
+
+`--mode dataset-replay` drops the synthetic growing-prefix generator and
+replays real multi-turn traces from a HuggingFace dataset (default
+`Inferact/codex_swebenchpro_traces`: 610 SWE-bench-pro trials, ShareGPT
+`conversations` with `human`/`gpt` alternation). Each row becomes one
+**trace**; the K-th LLM call sends the first `2K-1` turns as its prompt and
+uses the K-th assistant turn's recorded length as `max_tokens`, so the server
+sees the real growing-prefix shape of a working coding agent.
+
+A fixed pool of `--agent-concurrency` walkers each pick a trace round-robin and
+replay it call by call, inserting interactive waits between calls (machine,
+after each assistant turn) and at trace boundaries (human):
+
+```bash
+python3 agent_throughput.py \
+  --mode dataset-replay \
+  --server http://localhost:8001 --model qwen3-30b-a3b-nvfp4 \
+  --tokenizer Qwen/Qwen3-30B-A3B \
+  --agent-concurrency 8 \
+  --ramp-duration 0 --sustain-duration 300 \
+  --name codex-replay --data-dir ./benchmarks
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--agent-dataset` | `Inferact/codex_swebenchpro_traces` | HF dataset (ShareGPT `conversations` shape) |
+| `--agent-dataset-split` | `train` | split to load |
+| `--agent-num-traces` | `0` | traces to load (`0` = whole split) |
+| `--agent-concurrency` | `8` | concurrent trace walkers |
+| `--agent-wait-machine-secs` | `2.0` | wait after each assistant turn within a trace |
+| `--agent-wait-human-secs` | `10.0` | wait at trace boundaries |
+| `--agent-wait-jitter` | `0.0` | wait CV (0=deterministic, 1.0=Poisson, >1=long-tail) |
+
+All seven knobs also resolve from a `--workload-config` YAML (CLI overrides
+YAML). The wait is Gamma-distributed: `Gamma(shape=1/jitter², scale=mean·jitter²)`
+so `E=mean`, `CV=jitter`; floors are 0.05 s (machine) / 1 s (human), cap 300 s.
+The assistant turns in the dataset are length-preserving placeholders — prefill
+/ decode token counts are the load-bearing quantities, and the decoded text is
+server-generated anyway. The dataset is fetched via `datasets`; point `HF_HOME`
+at a volume with free disk if your default cache is small.
+
 ---
 
 ## Output layout

@@ -2604,6 +2604,399 @@ async def run_session_walk(
         print(f"  ChatSession lifetimes: min={min(lifetimes):.0f}s, max={max(lifetimes):.0f}s, mean={sum(lifetimes)/len(lifetimes):.0f}s")
 
 
+# ---------------------------------------------------------------------------
+# Dataset replay (Sub-mode B): replay real multi-turn agent traces.
+#
+# Each dataset row -> one trace. The K-th LLM call uses the first 2K-1 turns as
+# its prompt and the K-th assistant turn's recorded length as max_tokens, so
+# the server sees the real growing-prefix shape of a working coding agent.
+# ---------------------------------------------------------------------------
+
+
+def parse_trace_row(row: dict) -> List[Tuple[str, str]]:
+    """Parse one dataset row into alternating (role, content) turns.
+
+    Rows are the codex-traces shape: a `conversations` list of
+    {"from": "human"/"gpt", "value": str}, strictly alternating and starting
+    with a human turn. human -> user, gpt -> assistant.
+    """
+    return [
+        ("assistant" if item["from"] == "gpt" else "user", item["value"])
+        for item in row["conversations"]
+    ]
+
+
+def load_agent_traces(dataset: str, split: str, num_traces: int, tokenizer) -> List[dict]:
+    """Load the agent-traces dataset and pre-compute per-trace turn token counts.
+
+    Returns a list of trace dicts with keys: id, turns [(role, content)],
+    turn_tokens [int], num_calls. `num_traces in (0, None)` loads the whole split.
+    """
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise SystemExit(
+            f"{Colors.RED}dataset-replay needs the 'datasets' package: "
+            f"pip install 'datasets>=4.0'{Colors.END}"
+        ) from exc
+
+    print(f"{Colors.CYAN}Loading dataset {dataset} (split={split})...{Colors.END}")
+    ds = load_dataset(dataset, split=split)
+    n_total = len(ds)
+    n = n_total if num_traces in (0, None) else min(num_traces, n_total)
+
+    traces: List[dict] = []
+    skipped = 0
+    for i in range(n):
+        turns = parse_trace_row(ds[i])
+        num_calls = len(turns) // 2  # each call = a user turn followed by an assistant turn
+        if num_calls < 1:
+            skipped += 1
+            continue
+        turn_tokens = [
+            len(tokenizer.encode(content, add_special_tokens=False))
+            for _, content in turns
+        ]
+        traces.append({
+            "id": f"trace-{i}",
+            "turns": turns,
+            "turn_tokens": turn_tokens,
+            "num_calls": num_calls,
+        })
+
+    if not traces:
+        raise SystemExit(f"{Colors.RED}No usable traces parsed from {dataset}{Colors.END}")
+    calls = [t["num_calls"] for t in traces]
+    print(f"{Colors.GREEN}Loaded {len(traces)} traces ({skipped} skipped); "
+          f"LLM calls/trace: min={min(calls)} p50={int(np.median(calls))} "
+          f"max={max(calls)}{Colors.END}")
+    return traces
+
+
+def draw_agent_wait(mean: float, jitter: float, floor: float, cap: float = 300.0) -> float:
+    """Interactive inter-turn wait, Gamma-distributed.
+
+    `jitter` is the coefficient of variation (CV = std/mean):
+      jitter=0   -> deterministic `mean`
+      jitter=1.0 -> exponential (classic Poisson inter-arrival)
+      jitter>1   -> long-tail
+    Sampled as Gamma(shape=1/jitter^2, scale=mean*jitter^2) so E=mean, CV=jitter.
+    The result is floored and capped.
+    """
+    if mean <= 0:
+        return 0.0
+    if jitter <= 0:
+        wait = mean
+    else:
+        shape = 1.0 / (jitter * jitter)
+        scale = mean * jitter * jitter
+        wait = float(np.random.gamma(shape=shape, scale=scale))
+    return max(floor, min(wait, cap))
+
+
+async def run_dataset_replay(
+    server_url: str,
+    model: str,
+    tokenizer,
+    dataset: str,
+    dataset_split: str,
+    num_traces: int,
+    concurrency: int,
+    ramp_duration_secs: float,
+    sustain_duration_secs: float,
+    wait_machine_secs: float,
+    wait_human_secs: float,
+    wait_jitter: float,
+    api_key: str = None,
+    window_size: float = 15.0,
+    acc_len: float = 3.0,
+    mtp_overhead_factor: float = 1.0,
+    num_gpus: int = 1,
+    random_seed: int = None,
+    dashboard_mode: bool = False,
+    benchmark_name: str = None,
+    data_dir: Path = None,
+    ignore_eos: bool = True,
+    mtp_draft_tokens: int = 1,
+):
+    """Replay real multi-turn agent traces from a ShareGPT-format dataset.
+
+    A fixed pool of `concurrency` walkers each pick a trace (round-robin) and
+    replay it call by call: the K-th call sends the first 2K-1 turns as the
+    prompt with max_tokens taken from the K-th assistant turn's recorded
+    length. A machine wait is inserted between calls within a trace; a human
+    wait at trace boundaries.
+    """
+    traces = load_agent_traces(dataset, dataset_split, num_traces, tokenizer)
+
+    metrics = BenchMetrics()
+    sessions: List[ChatSession] = []  # unused here; satisfies save_metrics_loop signature
+    session_stats = {"created_by_rate": 0, "abandoned_by_rate": 0}
+
+    metrics_file = None
+    run_dir = None
+    if dashboard_mode and benchmark_name and data_dir:
+        storage = RunStorage(root_dir=data_dir)
+        run_dir = storage.create_run_directory(benchmark_name)
+        metrics_file = run_dir / "metrics.jsonl"
+        storage.save_metadata(run_dir, {
+            "mode": "dataset-replay",
+            "server_url": server_url,
+            "model": model,
+            "dataset": dataset,
+            "dataset_split": dataset_split,
+            "num_traces": len(traces),
+            "concurrency": concurrency,
+            "ramp_duration_secs": ramp_duration_secs,
+            "sustain_duration_secs": sustain_duration_secs,
+            "wait_machine_secs": wait_machine_secs,
+            "wait_human_secs": wait_human_secs,
+            "wait_jitter": wait_jitter,
+            "num_gpus": num_gpus,
+            "acc_len": acc_len,
+            "mtp_overhead_factor": mtp_overhead_factor,
+        })
+        print(f"{Colors.GREEN}Benchmark mode enabled. Output: {run_dir}{Colors.END}")
+
+    total_duration = ramp_duration_secs + sustain_duration_secs
+
+    # Round-robin trace cursor shared across walkers (single-threaded asyncio).
+    trace_cursor = {"i": 0}
+
+    def next_trace() -> dict:
+        t = traces[trace_cursor["i"] % len(traces)]
+        trace_cursor["i"] += 1
+        return t
+
+    async def send_call(http_session, trace: dict, k: int) -> bool:
+        """Send the K-th (1-indexed) LLM call of `trace`."""
+        metrics.requests_sent += 1
+        turns = trace["turns"]
+        turn_tokens = trace["turn_tokens"]
+        # prompt = first 2K-1 turns (ends on a user turn)
+        prompt_turns = turns[: 2 * k - 1]
+        messages = [{"role": r, "content": c} for r, c in prompt_turns]
+
+        planned_prompt = sum(turn_tokens[: 2 * k - 1])
+        # Ideal cacheable prefix = what the previous call already established:
+        # turns[0:2k-2]. Zero for the first call in a trace.
+        prefix_tokens = 0 if k <= 1 else sum(turn_tokens[: 2 * k - 2])
+        # max_tokens = recorded length of the K-th assistant turn (index 2k-1)
+        gen_len = max(1, turn_tokens[2 * k - 1])
+
+        metrics.planned_prompt_lengths.append(planned_prompt)
+        metrics.planned_ideal_cache_hit_rates.append(
+            prefix_tokens / planned_prompt if planned_prompt > 0 else 0.0
+        )
+        metrics.request_timeline.append((time.time(), k == 1, trace["id"], False))
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "max_tokens": gen_len,
+            "temperature": 0.0,
+            "user": trace["id"],
+            "ignore_eos": ignore_eos,
+        }
+        url = f"{server_url}/v1/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        start_time = time.time()
+        ttft = None
+        cached_tokens = 0
+        reasoning_tokens = 0
+        actual_prompt_tokens = 0
+        full_response = ""
+        chunk_token_counts = []
+        try:
+            async with http_session.post(url, json=payload, headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=240)) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    print(f"{Colors.RED}{trace['id']} call {k} failed: "
+                          f"HTTP {resp.status} - {error_text[:200]}{Colors.END}")
+                    metrics.errors += 1
+                    return False
+
+                async for line in resp.content:
+                    if not line:
+                        continue
+                    line_str = line.decode("utf-8").strip()
+                    if not line_str.startswith("data: "):
+                        continue
+                    data_str = line_str[6:]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                        if not data or not isinstance(data, dict):
+                            continue
+                        if data.get("choices"):
+                            delta = data["choices"][0].get("delta", {})
+                            resp_content = delta.get("content", "")
+                            resp_reason = delta.get("reasoning_content") or delta.get("reasoning")
+                            if (resp_content or resp_reason) and ttft is None:
+                                ttft = time.time() - start_time
+                            if resp_reason:
+                                full_response += resp_reason
+                            if resp_content:
+                                full_response += resp_content
+                                chunk_tokens = len(tokenizer.encode(resp_content, add_special_tokens=False)) - 1
+                                if chunk_tokens > 0:
+                                    chunk_token_counts.append(chunk_tokens)
+                        if data.get("usage"):
+                            usage = data["usage"]
+                            if isinstance(usage, dict):
+                                if "prompt_tokens" in usage:
+                                    actual_prompt_tokens = usage.get("prompt_tokens", 0)
+                                if "cache_read_input_tokens" in usage:
+                                    cached_tokens = usage.get("cache_read_input_tokens") or 0
+                                elif "prompt_tokens_details" in usage:
+                                    details = usage["prompt_tokens_details"]
+                                    if isinstance(details, dict):
+                                        cached_tokens = details.get("cached_tokens") or 0
+                                if "reasoning_tokens" in usage:
+                                    reasoning_tokens = usage.get("reasoning_tokens") or 0
+                    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                        pass
+
+                completion_tokens = len(tokenizer.encode(full_response, add_special_tokens=False)) if full_response else 0
+                if ttft is None:
+                    ttft = time.time() - start_time
+                tokens_to_record = actual_prompt_tokens if actual_prompt_tokens > 0 else planned_prompt
+                end_time = time.time()
+                total_time = end_time - start_time
+                generation_time = total_time - ttft if ttft and total_time > ttft else 0.0
+                generation_tps = completion_tokens / generation_time if generation_time > 0 and completion_tokens > 0 else 0.0
+                generation_tps_mtp = (completion_tokens * acc_len) / (generation_time * mtp_overhead_factor) if generation_time > 0 and completion_tokens > 0 else 0.0
+                metrics.add_prefill(tokens_to_record, ttft, cached_tokens, generation_tps, generation_tps_mtp,
+                                    completion_tokens, generation_time, prefix_tokens,
+                                    reasoning_tokens=reasoning_tokens)
+                if chunk_token_counts:
+                    metrics.add_acceptance_length(sum(chunk_token_counts) / len(chunk_token_counts))
+                else:
+                    metrics.requests_completed += 1
+                return True
+
+        except asyncio.TimeoutError:
+            metrics.errors += 1
+            print(f"{Colors.RED}{trace['id']} call {k} timed out{Colors.END}")
+            return False
+        except Exception as e:
+            metrics.errors += 1
+            print(f"{Colors.RED}{trace['id']} call {k} error: {e}{Colors.END}")
+            return False
+
+    async def walker(http_session, walker_id: int):
+        # Stagger walker starts across the ramp window.
+        if ramp_duration_secs > 0 and concurrency > 1:
+            await asyncio.sleep((walker_id / concurrency) * ramp_duration_secs)
+        while time.time() - start_wall < total_duration:
+            trace = next_trace()
+            for k in range(1, trace["num_calls"] + 1):
+                if time.time() - start_wall >= total_duration:
+                    return
+                await send_call(http_session, trace, k)
+                if k < trace["num_calls"]:
+                    mw = draw_agent_wait(wait_machine_secs, wait_jitter, floor=0.05)
+                    if mw > 0:
+                        await asyncio.sleep(mw)
+            hw = draw_agent_wait(wait_human_secs, wait_jitter, floor=1.0)
+            if hw > 0:
+                await asyncio.sleep(hw)
+
+    print(f"\n{Colors.BOLD}LLM Throughput Simulator (Dataset Replay Mode){Colors.END}")
+    print(f"{Colors.DIM}{'-'*80}{Colors.END}")
+    print(f"Server: {server_url}")
+    print(f"Model: {model}")
+    print(f"Dataset: {dataset} (split={dataset_split}), traces: {len(traces)}")
+    print(f"Concurrency: {concurrency} walkers")
+    print(f"Waits: machine={wait_machine_secs}s human={wait_human_secs}s jitter={wait_jitter}")
+    print(f"Duration: ramp={ramp_duration_secs}s + sustain={sustain_duration_secs}s")
+    print(f"{Colors.DIM}{'='*80}{Colors.END}\n")
+
+    start_wall = time.time()
+    metrics.start_time = start_wall
+    running_flag = {"running": True}
+    metrics_task = None
+    if metrics_file:
+        metrics_task = asyncio.create_task(
+            save_metrics_loop(metrics, sessions, metrics_file, window_size, num_gpus,
+                              mtp_draft_tokens, running_flag, session_stats,
+                              ramp_duration_secs=ramp_duration_secs,
+                              sustain_duration_secs=sustain_duration_secs)
+        )
+
+    connector = aiohttp.TCPConnector(limit=1000)
+    async with aiohttp.ClientSession(connector=connector) as http_session:
+        walker_tasks = [asyncio.create_task(walker(http_session, i)) for i in range(concurrency)]
+        try:
+            while time.time() - start_wall < total_duration:
+                elapsed = time.time() - start_wall
+                in_flight = metrics.get_in_flight()
+                print(f"\r{Colors.BOLD}[{elapsed:6.1f}s]{Colors.END} "
+                      f"Requests: {metrics.requests_completed}/{metrics.requests_sent} | "
+                      f"In-flight: {in_flight} | Errors: {metrics.errors}",
+                      end="", flush=True)
+                await asyncio.sleep(1.0)
+            print(f"\n\n{Colors.YELLOW}Benchmark complete. Waiting for in-flight requests...{Colors.END}")
+            await asyncio.sleep(5)
+            for t in walker_tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*walker_tasks, return_exceptions=True)
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}Interrupted by user{Colors.END}")
+            for t in walker_tasks:
+                t.cancel()
+            await asyncio.gather(*walker_tasks, return_exceptions=True)
+        finally:
+            running_flag["running"] = False
+            if metrics_task:
+                metrics_task.cancel()
+                try:
+                    await metrics_task
+                except asyncio.CancelledError:
+                    pass
+
+    actual_duration = time.time() - metrics.start_time
+    print(f"\n{Colors.BOLD}Final Results (Dataset Replay Mode):{Colors.END}")
+    print(f"{Colors.DIM}{'-'*80}{Colors.END}")
+    print(f"Total requests sent: {metrics.requests_sent:,}")
+    print(f"Completed: {metrics.requests_completed:,}")
+    print(f"Errors: {metrics.errors:,}")
+    print(f"Success rate: {100 * metrics.requests_completed / max(metrics.requests_sent, 1):.1f}%")
+    print(f"Actual benchmark duration: {actual_duration:.1f}s")
+
+    if metrics.actual_prompt_lengths:
+        p50, p90, p99 = percentiles(metrics.actual_prompt_lengths, [0.5, 0.9, 0.99])
+        print(f"\n{Colors.BOLD}Actual Prompt Length Distribution:{Colors.END}")
+        print(f"  Mean: {np.mean(metrics.actual_prompt_lengths):.0f}  p50: {p50:.0f}  p90: {p90:.0f}  p99: {p99:.0f} tokens")
+    if metrics.actual_generation_lengths:
+        p50, p90, p99 = percentiles(metrics.actual_generation_lengths, [0.5, 0.9, 0.99])
+        print(f"\n{Colors.BOLD}Actual Generation Length Distribution:{Colors.END}")
+        print(f"  Mean: {np.mean(metrics.actual_generation_lengths):.1f}  p50: {p50:.0f}  p90: {p90:.0f}  p99: {p99:.0f} tokens")
+
+    phases = compute_phase_breakdown(metrics, metrics.start_time, ramp_duration_secs, sustain_duration_secs)
+    print_phase_breakdown(phases, num_gpus=num_gpus)
+
+    if run_dir is not None:
+        write_run_summary(run_dir, metrics, phases, context={
+            "mode": "dataset-replay",
+            "server_url": server_url,
+            "model": model,
+            "dataset": dataset,
+            "num_gpus": num_gpus,
+            "concurrency": concurrency,
+            "ramp_duration_secs": ramp_duration_secs,
+            "sustain_duration_secs": sustain_duration_secs,
+        })
+
+
 # Workload config parameters that can be set via YAML config file
 WORKLOAD_CONFIG_PARAMS = [
     "mode",
@@ -2640,6 +3033,14 @@ WORKLOAD_CONFIG_PARAMS = [
     "session_lifetime_median",
     "max_sessions",
     "session_abandon_rate",
+    # Dataset replay mode parameters
+    "agent_dataset",
+    "agent_dataset_split",
+    "agent_num_traces",
+    "agent_concurrency",
+    "agent_wait_machine_secs",
+    "agent_wait_human_secs",
+    "agent_wait_jitter",
 ]
 
 
@@ -3238,8 +3639,24 @@ def main():
 
     # Mode selection
     parser.add_argument("--mode", type=str, default="traffic-replay",
-                       choices=["traffic-replay", "realistic", "preview"],
-                       help="Benchmark mode: 'traffic-replay' (default), 'realistic', or 'preview' (plan-only visualization)")
+                       choices=["traffic-replay", "realistic", "preview", "dataset-replay"],
+                       help="Benchmark mode: 'traffic-replay' (default), 'realistic', 'preview' (plan-only visualization), or 'dataset-replay' (replay real agent traces)")
+
+    # Dataset replay mode arguments (Sub-mode B)
+    parser.add_argument("--agent-dataset", type=str, default="Inferact/codex_swebenchpro_traces",
+                       help="[Dataset replay] HuggingFace dataset of ShareGPT-format agent traces (default: Inferact/codex_swebenchpro_traces)")
+    parser.add_argument("--agent-dataset-split", type=str, default="train",
+                       help="[Dataset replay] Dataset split to load (default: train)")
+    parser.add_argument("--agent-num-traces", type=int, default=0,
+                       help="[Dataset replay] Number of traces to load (0 = whole split) (default: 0)")
+    parser.add_argument("--agent-concurrency", type=int, default=8,
+                       help="[Dataset replay] Number of concurrent trace walkers (default: 8)")
+    parser.add_argument("--agent-wait-machine-secs", type=float, default=2.0,
+                       help="[Dataset replay] Tool-execution wait inserted after each assistant turn within a trace (default: 2.0)")
+    parser.add_argument("--agent-wait-human-secs", type=float, default=10.0,
+                       help="[Dataset replay] Human-in-the-loop wait inserted at trace boundaries (default: 10.0)")
+    parser.add_argument("--agent-wait-jitter", type=float, default=0.0,
+                       help="[Dataset replay] Wait variation coefficient (CV); 0=deterministic, 1.0=Poisson, >1=long-tail (default: 0.0)")
 
     # Realistic mode arguments
     parser.add_argument("--think-time-mean", type=float, default=10.0,
@@ -3357,6 +3774,34 @@ def main():
             max_sessions=args.max_sessions,
             new_session_rate=args.new_session_rate,
             session_abandon_rate=args.session_abandon_rate,
+        ))
+    elif args.mode == "dataset-replay":
+        print(f"{Colors.BOLD}Running in DATASET REPLAY mode{Colors.END}")
+        print(f"{Colors.DIM}(Replaying real multi-turn agent traces; growing-prefix per trace){Colors.END}")
+        asyncio.run(run_dataset_replay(
+            server_url=args.server,
+            model=args.model,
+            tokenizer=tokenizer,
+            dataset=args.agent_dataset,
+            dataset_split=args.agent_dataset_split,
+            num_traces=args.agent_num_traces,
+            concurrency=args.agent_concurrency,
+            ramp_duration_secs=args.ramp_duration,
+            sustain_duration_secs=args.sustain_duration,
+            wait_machine_secs=args.agent_wait_machine_secs,
+            wait_human_secs=args.agent_wait_human_secs,
+            wait_jitter=args.agent_wait_jitter,
+            api_key=args.api_key,
+            window_size=args.window,
+            acc_len=args.acc_len,
+            mtp_overhead_factor=args.mtp_overhead_factor,
+            num_gpus=args.gpus,
+            random_seed=args.random_seed,
+            dashboard_mode=args.dashboard_mode,
+            benchmark_name=args.name,
+            data_dir=Path(args.data_dir) if args.data_dir else None,
+            ignore_eos=not args.disable_ignore_eos,
+            mtp_draft_tokens=args.mtp_draft_tokens,
         ))
     else:
         print(f"{Colors.BOLD}Running in TRAFFIC REPLAY mode{Colors.END}")

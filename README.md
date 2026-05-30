@@ -1,9 +1,8 @@
 # agent-bench
 
-Agent workload benchmarking for inference endpoints. The headline workload
-is **multi-turn growing-prefix sessions** — what a real code/chat agent
-looks like on the wire. A classic synthetic-traffic benchmark (burst /
-concurrent / QPS) is preserved as a `legacy` reference baseline.
+Agent workload benchmarking for inference endpoints. The workload is
+**multi-turn growing-prefix sessions** — what a real code/chat agent looks
+like on the wire.
 
 | invocation | workload shape |
 |---|---|
@@ -11,43 +10,36 @@ concurrent / QPS) is preserved as a `legacy` reference baseline.
 | `agent-bench agent …`  | **primary** — multi-turn code-agent workload with growing prefixes (so a realistic fraction of each request is cache-hittable), configurable human/machine wait time between turns. Backed by `agent.agent_throughput:main`. |
 | `agent-bench sweep …`  | QPS sweep / SLO-driven capacity search wrapping `agent`. Backed by `agent.runner:main`. |
 | `agent-bench viewer …` | live Dash/Plotly dashboard over `benchmarks/`. Requires the `viewer` extras. Backed by `agent.viewer:main`. |
-| `agent-bench legacy …` | reference baseline — classic open/closed-loop synthetic traffic (burst, concurrent, QPS). Useful for sanity-checking a server before running the agent workload. Backed by `legacy.run:main`. |
 
 Run `agent-bench <subcommand> --help` for that subcommand's flags. The
-workload shapes have disjoint configuration surfaces, so each subcommand
-keeps its own argument set. The `agent` subcommand has its own
-`--mode {traffic-replay,realistic,preview}` for in-mode variations.
+`agent` subcommand has its own `--mode {traffic-replay,realistic,preview}`
+for in-mode variations.
 
-`agent-bench` is the only console script the wheel installs. If you call
-it with classic batch-style flags but no subcommand
-(`agent-bench --provider … --base_url …`), it routes to `legacy` and
-prints a one-line nudge to use `agent-bench legacy …` explicitly.
+`agent-bench` is the only console script the wheel installs. Bare flags with
+no subcommand (`agent-bench --server … --model …`) are treated as `agent`
+args, since that's the default mode.
 
-Repo layout: `agent/` (primary code), `legacy/` (reference batch
-benchmark), `agentbench/` (top-level CLI dispatcher).
+Repo layout: `agent/` (driver + workloads), `agentbench/` (top-level CLI
+dispatcher).
 
-## Supported Backends
+## Server endpoint
 
-`openai` | `vllm` | `sglang` | `trtllm` | `anthropic` | `tgi` | `fireworks` | `nvidia_nim` | `together` | `embeddings`
+agent-bench drives any OpenAI-compatible `/v1/chat/completions` endpoint
+(`--server <url> --model <name>`). sglang, vllm, and OpenAI itself all work.
 
 ### Prompt-cache reporting
 
-When the backend reports prompt-cache stats, agent-bench surfaces them per request and as an aggregate:
+When the server reports prompt-cache stats in the response `usage`, agent-bench
+surfaces the cache-hit rate per request and as an aggregate. It reads either
+field, whichever the server populates:
 
-| backend | cache fields populated | how to enable |
-|---|---|---|
-| `anthropic` | `cached_input_tokens` (read) + `cache_creation_input_tokens` (write) | always on — backend marks the system prompt (or last user content block) with `cache_control: {"type":"ephemeral"}` so identical-prefix requests register cache hits |
-| `openai` / `sglang` / `vllm` | `cached_input_tokens` from `usage.prompt_tokens_details.cached_tokens` | server must report — for sglang launch with `--enable-cache-report --enable-prefix-cache`; OpenAI does it automatically |
-| `trtllm` / `tgi` / `fireworks` / `nvidia_nim` / `together` | (none today — these backends don't surface cache stats) | n/a |
+| usage field | reported by |
+|---|---|
+| `usage.prompt_tokens_details.cached_tokens` | OpenAI / sglang / vllm — for sglang, launch with `--enable-cache-report --enable-prefix-cache` |
+| `usage.cache_read_input_tokens` | Anthropic-style usage |
 
-Report rendering adds two extra rows when any backend reports caching:
-
-```
-Prompt cache hit rate:     78.4% +/- 12.1%
-Total cached input tokens: 318472
-```
-
-The pre-built configs `anthropic_cache_demo.yaml` and `sglang_cache_report.yaml` exercise these paths.
+The cache-hit rate then shows up in the agent-mode summary (Cached TPM /
+cache hit %).
 
 ## Installation
 
@@ -68,31 +60,10 @@ This installs the unified `agent-bench` console script:
 | `agent-bench` / `agent-bench agent …` | multi-turn workload with growing prefixes (primary) |
 | `agent-bench sweep …` | QPS sweep / SLO capacity search wrapping `agent` |
 | `agent-bench viewer …` | live Dash/Plotly dashboard (needs `pip install 'agent-bench[viewer]'`) |
-| `agent-bench legacy …` | classic synthetic-load reference benchmark |
 
-Two sets of pre-built workload profiles ship inside the wheel:
-
-| set | for | discover via |
-|---|---|---|
-| `agent/workloads/*.yaml` | `agent-bench agent --workload-config <path>` | `agent.workloads_dir()` / `agent.list_workloads()` |
-| `legacy/configs/*.yaml` | `agent-bench legacy --config <path>` | `legacy.configs_dir()` / `legacy.list_configs()` |
-
-Bundled legacy/reference profiles (sanity baselines — pick one and add `--base_url`/`--model_name`):
-
-| name | shape | what it stresses |
-|---|---|---|
-| `chat_short` | 200 in / 200 out / concurrent=32 | scheduling + decode throughput at ChatGPT-style traffic |
-| `rag_doc_qa` | 10K in / 300 out / concurrent=16 | prefill BW + attention on long context |
-| `code_completion` | 2K in / 64 out / qps=10 constant | TTFT SLO at sustained low-latency arrivals |
-| `reasoning_long_decode` | 2K in / 8K out / concurrent=8 | TPOT stability over long generation + KV pressure |
-| `long_prefill_ttft` | 65K in / 100 out / concurrent=4 | TTFT and chunked-prefill sizing |
-| `pure_cold_random` | 64K in / 800 out / concurrent=24 | mirrors the cg+profile kernel-decomposition workload |
-| `hf_math500_reasoning` / `hf_gsm8k` / `hf_humaneval` | public eval-set prompts | real prompt distribution, not synthetic filler |
-| `prefix_cache_80pct` | gsp 80% cached / concurrent=16 | OS prefix-cache effectiveness on shared-prefix traffic |
-| `sharegpt_chat` | sharegpt 512/256 / concurrent=24 | chat shape without HF dataset auth |
-| `jsonl_template` | replay-from-jsonl skeleton | swap in your own prompts |
-| `anthropic_cache_demo` | Claude + `cache_control` markers | Anthropic Messages API + prompt caching |
-| `sglang_cache_report` | shared-prefix shape, reports cache hits | sglang radix-cache hit-rate measurement |
+Pre-built workload profiles ship inside the wheel under `agent/workloads/*.yaml`
+(`agent-bench agent --workload-config <path>`; discover with
+`agent.workloads_dir()` / `agent.list_workloads()`).
 
 Bundled agent profiles (multi-turn shapes):
 
@@ -107,9 +78,8 @@ Bundled agent profiles (multi-turn shapes):
 Discover at runtime:
 
 ```python
-import agent, legacy
+import agent
 print(agent.workloads_dir(),  agent.list_workloads())
-print(legacy.configs_dir(),   legacy.list_configs())
 ```
 
 Or pass any of them by absolute path:
@@ -117,14 +87,10 @@ Or pass any of them by absolute path:
 ```bash
 agent-bench agent --workload-config $(python -c 'import agent; print(agent.workloads_dir() / "rag_oneshot.yaml")') \
                   --server http://localhost:8001 --model your/model --tokenizer your/tokenizer
-
-agent-bench legacy --config $(python -c 'import legacy; print(legacy.configs_dir() / "chat_short.yaml")') \
-                   --base_url http://localhost:8001/v1 \
-                   --model_name your/model --tokenizer_name your/tokenizer
 ```
 
-The legacy invocations `python3 agent/agent_throughput.py …` and
-`python3 agent/runner.py …` still work from a source checkout.
+The source-checkout invocations `python3 agent/agent_throughput.py …` and
+`python3 agent/runner.py …` also work directly.
 
 ---
 
@@ -152,7 +118,7 @@ agent-bench agent \
   --workload-config "$(python3 -c 'import agent; print(agent.workloads_dir() / "code_agent_128k.yaml")')" \
   --max-qps 0.3 --ramp-duration 45 --sustain-duration 300
 
-# Or from a source checkout (legacy form, still works):
+# Or directly from a source checkout:
 python3 agent/agent_throughput.py \
   --server http://localhost:8001 \
   --model qwen3-30b-a3b-nvfp4 \
@@ -172,15 +138,37 @@ Replay real agent traces. Default dataset is
 (610 SWE-bench-pro trials from a Codex-style agent, ~20K LLM calls total,
 ShareGPT-format `human↔gpt` alternation).
 
-Each row of the dataset becomes one `ChatSession`. The K-th LLM call uses the
+Each row of the dataset becomes one **trace**. The K-th LLM call uses the
 first `2K-1` turns as its prompt; the K-th assistant turn's recorded length
-becomes the `max_tokens` for that call. Server gets the real prompt
+becomes the `max_tokens` for that call. The server gets the real prompt
 distribution from a working coding agent.
 
-Note: the prior README copy described `--agent-input dataset` /
-`--agent-dataset` flags. Those flags are not currently wired into
-`agent_throughput.py --help`; see `agent/README.md` for the actually
-supported configuration.
+Run it with `--mode dataset-replay`. A fixed pool of `--agent-concurrency`
+walkers each pick a trace (round-robin) and replay it call by call, inserting
+the interactive waits described below:
+
+```bash
+agent-bench agent \
+  --mode dataset-replay \
+  --server http://localhost:8001 --model your/model \
+  --tokenizer your/tokenizer \
+  --agent-concurrency 8 \
+  --ramp-duration 0 --sustain-duration 300
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--agent-dataset` | `Inferact/codex_swebenchpro_traces` | HF dataset of agent traces (`conversations` ShareGPT shape) |
+| `--agent-dataset-split` | `train` | dataset split to load |
+| `--agent-num-traces` | `0` | number of traces to load (`0` = whole split) |
+| `--agent-concurrency` | `8` | number of concurrent trace walkers |
+| `--agent-wait-machine-secs` | `2.0` | wait after each assistant turn within a trace |
+| `--agent-wait-human-secs` | `10.0` | wait at trace boundaries |
+| `--agent-wait-jitter` | `0.0` | wait CV (0=deterministic, 1.0=Poisson) |
+
+All flags can also be set under `workload:` in a `--workload-config` YAML
+(CLI overrides YAML). The dataset is loaded via HuggingFace `datasets`; point
+`HF_HOME` at a volume with free disk if your default cache is small.
 
 Measured properties of `Inferact/codex_swebenchpro_traces` (100-trace sample,
 char-count proxy — confirms the dataset card's 94.2% self-report):
@@ -249,7 +237,7 @@ YAML; if neither is given, code defaults (2.0 / 10.0 / 0.0) apply.
 workload:
   # ... existing fields ...
 
-  # Interactive wait between turns (agent mode only)
+  # Interactive wait between turns (dataset-replay mode)
   agent_wait_machine_secs: 2.0     # tool / compile / test return latency
   agent_wait_human_secs:   10.0    # human review / next-task dispatch
   agent_wait_jitter:       0.0     # CV; 0=deterministic, 1.0=Poisson, >1=long-tail
@@ -263,124 +251,7 @@ CLI flag  >  workload YAML  >  code default
 
 ---
 
-## Reference baseline — `agent-bench legacy` (entry point: `legacy.run:main`)
-
-The classic synthetic-traffic benchmark, kept around as a sanity-check
-baseline before the agent workload. Traffic is shaped by one of three
-patterns; choose `--traffic_pattern`.
-
-### Burst
-
-Sends batched requests at a fixed concurrency level with configurable intervals
-between batches.
-
-```bash
-agent-bench legacy \
-  --provider sglang \
-  --base_url http://localhost:30000/v1 \
-  --model_name Qwen/Qwen2.5-72B-Instruct \
-  --tokenizer_name Qwen/Qwen2.5-72B-Instruct \
-  --traffic_pattern burst \
-  --concurrency 16 \
-  --max_num_burst 10 \
-  --burst_interval 0.0325 \
-  --dataset_type synthetic \
-  --synthetic_input_length 512 \
-  --synthetic_output_length 256 \
-  --num_examples 160 \
-  --num_gpus 4 \
-  --chat false --stream true --ignore_eos true
-```
-
-### Concurrent
-
-N workers, each sends a new request as soon as the previous one completes.
-
-```bash
-agent-bench legacy \
-  --traffic_pattern concurrent \
-  --concurrency 32 \
-  ...
-```
-
-### QPS
-
-Requests arrive at a target rate with configurable inter-arrival distribution.
-
-```bash
-agent-bench legacy \
-  --traffic_pattern qps \
-  --levels 4 \
-  --duration 30 \
-  --qps_distribution uniform \
-  ...
-```
-
-### Dataset Types (legacy mode)
-
-| Type | Description |
-|---|---|
-| `synthetic` | Fixed-length filler prompts for controlled benchmarking |
-| `hf` | HuggingFace datasets (default: arena-hard-auto) |
-| `jsonl` | Local JSONL files or R2-hosted files |
-| `sharegpt` | ShareGPT-format conversation data |
-| `generated-shared-prefix` | Two-dataset prefix caching benchmark |
-
----
-
-## Benchmark Results
-
-### Qwen2.5-72B-Instruct on 4x NVIDIA B200 (SGLang, TP=4) — legacy mode
-
-Input: 512 tokens, Output: 256 tokens, Synthetic dataset
-
-| Pattern | Level | Requests | Failed | User TPS | TTFT p50 (ms) | TTFT p99 (ms) | Job TPS |
-|---|---|---|---|---|---|---|---|
-| burst | 16 | 160 | 0 | 90.9 | 317 | 776 | 1,246 |
-| concurrent | 32 | 128 | 0 | 77.9 | 779 | 974 | 1,982 |
-| qps | 4.0 | 120 | 0 | 80.5 | 50 | 396 | 950 |
-
-### Qwen2.5-7B-Instruct on 1x NVIDIA B200 (SGLang) — legacy mode
-
-Input: 128 tokens, Output: 128 tokens, Synthetic dataset
-
-| Pattern | Level | Requests | Failed | User TPS | TTFT p50 (ms) | TTFT p99 (ms) | Job TPS |
-|---|---|---|---|---|---|---|---|
-| burst | 4 | 20 | 0 | 247 | 68 | 489 | 606 |
-| concurrent | 8 | 32 | 0 | 255 | 83 | 157 | 1,514 |
-| qps | 2.0 | 20 | 0 | 257 | 13 | 40 | 296 |
-
----
-
 ## Output
-
-### Batch mode
-
-Results are saved to CSV (default: `evaluation_results.csv`) and printed as
-a table:
-
-```
-Backend: sglang, Model: Qwen/Qwen2.5-72B-Instruct, GPUs: 4
-----------------------------------------  -----------------
-Traffic mode:                                         burst
-Concurrency level:                                     16.0
-Total num. of requests:                                 160
-Num. of failed requests:                                  0
-Total elapsed time (s):                               32.88
-----------------------------------------  -----------------
-Prompt length:                                528.3 +/- 0.6
-Decode length:                                256.0 +/- 0.0
-----------------------------------------  -----------------
-Per-request tokens/s:                        90.91 +/- 1.92
-Per-request TTFT mean (ms):               363.37 +/- 154.97
-Per-request TTFT median (ms):                        316.70
-Per-request TTFT P99 (ms):                           775.61
-Per-request P99 round-trip latency (ms):               3557
-Per-GPU tokens/s:                          321.29 +/- 12.63
-Job-level tokens/s (decode):                        1245.75
-Job-level actual QPS:                                  4.87
-----------------------------------------  -----------------
-```
 
 ### Agent mode
 
@@ -421,48 +292,10 @@ See `agent/README.md` for the full SSH port-forward recipes (including
 
 ---
 
-## Advanced Options
+## Sweeps
 
-### YAML Config
-
-```bash
-agent-bench legacy --config my_benchmark.yaml
-```
-
-### W&B Tracking
-
-```bash
-agent-bench legacy --wandb_enabled true --wandb_project my-project \
-  --wandb_tags "70b,sglang,burst"
-```
-
-### LoRA Benchmarking (legacy mode)
-
-```bash
-agent-bench legacy \
-  --adapter_paths "s3://bucket/lora1,s3://bucket/lora2" \
-  --lora_ratio 0.5 \
-  --lora_distribution round_robin \
-  ...
-```
-
-### Extra Metadata
-
-Attach custom metadata columns to the CSV output:
-
-```bash
-agent-bench legacy --extra-server us-east-1 --extra-gpu-type b200 ...
-```
-
-### Multi-Level Sweeps (legacy mode)
-
-```bash
-agent-bench legacy --traffic_pattern burst --levels "4,8,16,32" ...
-agent-bench legacy --traffic_pattern qps --levels "1,2,4,8" --duration 60 ...
-```
-
-For agent mode, use `agent-bench sweep` for QPS sweeps and SLO-driven binary
-search; see `agent/README.md`.
+Use `agent-bench sweep` for QPS sweeps and SLO-driven binary search around the
+agent workload; see `agent/README.md` for the flag set.
 
 ---
 

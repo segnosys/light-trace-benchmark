@@ -32,7 +32,7 @@ jobs:
           pip install jsonargparse together pyyaml
 
       - name: Lint (ruff)
-        run: ruff check lightrace/ agent/ tests/
+        run: ruff check agent/ agentbench/ tests/
 
       - name: Run tests
         run: pytest tests/ -v
@@ -58,7 +58,6 @@ jobs:
           set -e
           WHEEL=$(ls dist/*.whl | head -1)
           echo "wheel = $WHEEL"
-          # Must have BOTH agent/workloads and lightrace/configs YAMLs.
+          # Must ship agent/workloads YAMLs.
           python -m zipfile -l "$WHEEL" | grep -E 'workloads/.*\.yaml' | head -1 || (echo "no agent workloads in wheel"; exit 1)
-          python -m zipfile -l "$WHEEL" | grep -E 'configs/.*\.yaml' | head -1   || (echo "no lightrace configs in wheel"; exit 1)
           echo "wheel layout OK"

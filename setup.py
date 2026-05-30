@@ -8,24 +8,20 @@ setup(
     version="0.0.1",
     description=(
         "agent-bench: agent workload benchmarking for inference endpoints. "
-        "Multi-turn growing-prefix sessions are the primary mode; classic "
-        "synthetic-traffic benchmarking lives under the `legacy` subcommand "
-        "as a reference baseline."
+        "Multi-turn growing-prefix sessions against an inference endpoint."
     ),
     long_description=long_description,
     long_description_content_type="text/markdown",
-    # Three Python packages ship: `agent` (primary), `legacy` (classic
-    # synthetic-load reference), `agentbench` (top-level CLI dispatcher).
+    # Two Python packages ship: `agent` (driver + workloads) and `agentbench`
+    # (top-level CLI dispatcher).
     packages=find_packages(include=[
         "agent", "agent.*",
-        "legacy", "legacy.*",
         "agentbench", "agentbench.*",
     ]),
     # Bundle workload YAMLs so `pip install agent-bench` (no git clone) still
     # ships them.
     package_data={
         "agent": ["workloads/*.yaml"],
-        "legacy": ["configs/*.yaml"],
     },
     include_package_data=True,
     python_requires=">=3.10",
@@ -48,9 +44,6 @@ setup(
         "Jinja2>=3.1.0",
         "wandb",
         "pybase64",
-        # Previously: sglang==0.5.2. Removed — the two helpers we used
-        # (get_tokenizer, sample_random_requests) are now vendored in
-        # legacy/_sglang_compat.py to avoid downgrading the server's sglang.
     ],
     extras_require={
         # Optional Dash/Plotly viewer for agent-mode runs. Not pulled into
@@ -79,7 +72,6 @@ setup(
             #   agent-bench agent  …        multi-turn growing-prefix workload
             #   agent-bench sweep  …        QPS sweep / SLO capacity search
             #   agent-bench viewer …        live Dash/Plotly dashboard
-            #   agent-bench legacy …        classic synthetic-load benchmark
             "agent-bench = agentbench.cli:main",
         ],
     },
