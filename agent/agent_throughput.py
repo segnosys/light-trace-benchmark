@@ -20,6 +20,7 @@ import time
 import random
 import argparse
 import json
+import re
 import string
 import uuid
 import numpy as np
@@ -2626,11 +2627,29 @@ def parse_trace_row(row: dict) -> List[Tuple[str, str]]:
     ]
 
 
+_WALL_TIME_RE = re.compile(r"Wall time:\s*([0-9]+\.?[0-9]*)\s*seconds")
+_DURATION_RE = re.compile(r'"duration_seconds"\s*:\s*([0-9]+\.?[0-9]*)')
+
+
+def parse_tool_wait(text: str) -> Optional[float]:
+    """Real tool-execution wall time recorded in a tool-output turn.
+
+    codex traces stamp it as `Wall time: X seconds` (bash) or
+    `"duration_seconds": X` (json tool results). Returns None when absent so
+    the caller can fall back to the simulated wait.
+    """
+    m = _WALL_TIME_RE.search(text) or _DURATION_RE.search(text)
+    return float(m.group(1)) if m else None
+
+
 def load_agent_traces(dataset: str, split: str, num_traces: int, tokenizer) -> List[dict]:
     """Load the agent-traces dataset and pre-compute per-trace turn token counts.
 
     Returns a list of trace dicts with keys: id, turns [(role, content)],
-    turn_tokens [int], num_calls. `num_traces in (0, None)` loads the whole split.
+    turn_tokens [int], num_calls, tool_waits [Optional[float]]. `tool_waits[k-1]`
+    is the real tool-execution wall time recorded after call k (the latency
+    before call k+1), or None when the trace didn't record one.
+    `num_traces in (0, None)` loads the whole split.
     """
     try:
         from datasets import load_dataset
@@ -2657,19 +2676,30 @@ def load_agent_traces(dataset: str, split: str, num_traces: int, tokenizer) -> L
             len(tokenizer.encode(content, add_special_tokens=False))
             for _, content in turns
         ]
+        # Real tool wall time after call k lives in the tool-output turn 2k.
+        tool_waits = [
+            parse_tool_wait(turns[2 * k][1]) if 2 * k < len(turns) else None
+            for k in range(1, num_calls + 1)
+        ]
         traces.append({
             "id": f"trace-{i}",
             "turns": turns,
             "turn_tokens": turn_tokens,
             "num_calls": num_calls,
+            "tool_waits": tool_waits,
         })
 
     if not traces:
         raise SystemExit(f"{Colors.RED}No usable traces parsed from {dataset}{Colors.END}")
     calls = [t["num_calls"] for t in traces]
+    inter_call = sum(max(0, t["num_calls"] - 1) for t in traces)
+    recorded = sum(1 for t in traces for w in t["tool_waits"][:-1] if w is not None)
+    cov = 100.0 * recorded / inter_call if inter_call else 0.0
     print(f"{Colors.GREEN}Loaded {len(traces)} traces ({skipped} skipped); "
           f"LLM calls/trace: min={min(calls)} p50={int(np.median(calls))} "
           f"max={max(calls)}{Colors.END}")
+    print(f"{Colors.DIM}Recorded tool wall-times: {recorded}/{inter_call} inter-call gaps "
+          f"({cov:.1f}%); the rest fall back to the simulated machine wait.{Colors.END}")
     return traces
 
 
@@ -2707,6 +2737,7 @@ async def run_dataset_replay(
     wait_machine_secs: float,
     wait_human_secs: float,
     wait_jitter: float,
+    wait_scale: float = 1.0,
     api_key: str = None,
     window_size: float = 15.0,
     acc_len: float = 3.0,
@@ -2724,8 +2755,10 @@ async def run_dataset_replay(
     A fixed pool of `concurrency` walkers each pick a trace (round-robin) and
     replay it call by call: the K-th call sends the first 2K-1 turns as the
     prompt with max_tokens taken from the K-th assistant turn's recorded
-    length. A machine wait is inserted between calls within a trace; a human
-    wait at trace boundaries.
+    length. Between calls the driver waits the trace's *recorded* tool
+    wall-time when available, else a simulated machine wait
+    (`wait_machine_secs`/`wait_jitter`); `wait_scale` multiplies that gap. A
+    human wait (`wait_human_secs`, default 0) is inserted at trace boundaries.
     """
     traces = load_agent_traces(dataset, dataset_split, num_traces, tokenizer)
 
@@ -2752,6 +2785,7 @@ async def run_dataset_replay(
             "wait_machine_secs": wait_machine_secs,
             "wait_human_secs": wait_human_secs,
             "wait_jitter": wait_jitter,
+            "wait_scale": wait_scale,
             "num_gpus": num_gpus,
             "acc_len": acc_len,
             "mtp_overhead_factor": mtp_overhead_factor,
@@ -2902,7 +2936,11 @@ async def run_dataset_replay(
                     return
                 await send_call(http_session, trace, k)
                 if k < trace["num_calls"]:
-                    mw = draw_agent_wait(wait_machine_secs, wait_jitter, floor=0.05)
+                    rec = trace["tool_waits"][k - 1]
+                    if rec is not None:
+                        mw = min(rec * wait_scale, 300.0)
+                    else:
+                        mw = draw_agent_wait(wait_machine_secs, wait_jitter, floor=0.05) * wait_scale
                     if mw > 0:
                         await asyncio.sleep(mw)
             hw = draw_agent_wait(wait_human_secs, wait_jitter, floor=1.0)
@@ -2915,7 +2953,8 @@ async def run_dataset_replay(
     print(f"Model: {model}")
     print(f"Dataset: {dataset} (split={dataset_split}), traces: {len(traces)}")
     print(f"Concurrency: {concurrency} walkers")
-    print(f"Waits: machine={wait_machine_secs}s human={wait_human_secs}s jitter={wait_jitter}")
+    print(f"Waits: machine=recorded tool wall-time (fallback {wait_machine_secs}s, jitter={wait_jitter}), "
+          f"scale={wait_scale}x, human={wait_human_secs}s")
     print(f"Duration: ramp={ramp_duration_secs}s + sustain={sustain_duration_secs}s")
     print(f"{Colors.DIM}{'='*80}{Colors.END}\n")
 
@@ -3041,6 +3080,7 @@ WORKLOAD_CONFIG_PARAMS = [
     "agent_wait_machine_secs",
     "agent_wait_human_secs",
     "agent_wait_jitter",
+    "agent_wait_scale",
 ]
 
 
@@ -3652,11 +3692,13 @@ def main():
     parser.add_argument("--agent-concurrency", type=int, default=8,
                        help="[Dataset replay] Number of concurrent trace walkers (default: 8)")
     parser.add_argument("--agent-wait-machine-secs", type=float, default=2.0,
-                       help="[Dataset replay] Tool-execution wait inserted after each assistant turn within a trace (default: 2.0)")
-    parser.add_argument("--agent-wait-human-secs", type=float, default=10.0,
-                       help="[Dataset replay] Human-in-the-loop wait inserted at trace boundaries (default: 10.0)")
+                       help="[Dataset replay] Simulated tool-execution wait, used only as a FALLBACK for calls with no recorded wall-time (default: 2.0)")
+    parser.add_argument("--agent-wait-human-secs", type=float, default=0.0,
+                       help="[Dataset replay] Human-in-the-loop wait at trace boundaries; 0 = autonomous batch (default: 0.0)")
     parser.add_argument("--agent-wait-jitter", type=float, default=0.0,
-                       help="[Dataset replay] Wait variation coefficient (CV); 0=deterministic, 1.0=Poisson, >1=long-tail (default: 0.0)")
+                       help="[Dataset replay] CV for the simulated/fallback waits; 0=deterministic, 1.0=Poisson, >1=long-tail (default: 0.0)")
+    parser.add_argument("--agent-wait-scale", type=float, default=1.0,
+                       help="[Dataset replay] Multiplier on the inter-call machine wait (recorded or fallback); 0 disables, <1 speeds up replay (default: 1.0)")
 
     # Realistic mode arguments
     parser.add_argument("--think-time-mean", type=float, default=10.0,
@@ -3791,6 +3833,7 @@ def main():
             wait_machine_secs=args.agent_wait_machine_secs,
             wait_human_secs=args.agent_wait_human_secs,
             wait_jitter=args.agent_wait_jitter,
+            wait_scale=args.agent_wait_scale,
             api_key=args.api_key,
             window_size=args.window,
             acc_len=args.acc_len,

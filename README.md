@@ -162,9 +162,10 @@ agent-bench agent \
 | `--agent-dataset-split` | `train` | dataset split to load |
 | `--agent-num-traces` | `0` | number of traces to load (`0` = whole split) |
 | `--agent-concurrency` | `8` | number of concurrent trace walkers |
-| `--agent-wait-machine-secs` | `2.0` | wait after each assistant turn within a trace |
-| `--agent-wait-human-secs` | `10.0` | wait at trace boundaries |
-| `--agent-wait-jitter` | `0.0` | wait CV (0=deterministic, 1.0=Poisson) |
+| `--agent-wait-machine-secs` | `2.0` | **fallback** machine wait, used only for calls with no recorded tool wall-time |
+| `--agent-wait-human-secs` | `0.0` | human wait at trace boundaries (`0` = autonomous batch, the codex dataset's true shape) |
+| `--agent-wait-jitter` | `0.0` | CV for the simulated/fallback waits (0=deterministic, 1.0=Poisson) |
+| `--agent-wait-scale` | `1.0` | multiplier on the inter-call machine wait (recorded or fallback); `0` disables, `<1` speeds up replay |
 
 All flags can also be set under `workload:` in a `--workload-config` YAML
 (CLI overrides YAML). The dataset is loaded via HuggingFace `datasets`; point
@@ -190,26 +191,37 @@ quantities; the actual decoded text is server-generated anyway.
 
 ### Interactive wait time
 
-Between LLM calls the driver inserts a wait that simulates the latency outside
-the model: tools running, or a human reading and confirming.
+Between LLM calls the driver waits for the latency *outside* the model — tool
+execution, or a human reviewing. The codex dataset is a **fully autonomous
+agent** (every "human" turn is a bash/tool result, no real person) and it
+stamps the real tool wall-time on each turn, so the driver replays those
+directly instead of guessing:
+
+- **Machine wait (between calls within a trace)** — uses the trace's
+  **recorded tool wall-time** when present (~92% of gaps in the default
+  dataset). Calls with no recorded time fall back to a simulated wait drawn
+  from `--agent-wait-machine-secs` / `--agent-wait-jitter`.
+- **Human wait (at trace boundaries)** — `--agent-wait-human-secs`, default
+  **`0`** because the dataset is an autonomous batch. Raise it (e.g. 30–60s,
+  jitter 1.0) only to model a human-supervised product where someone reviews
+  and dispatches the next task.
 
 ```
---agent-wait-machine-secs   default 2.0     # tool-execution wait
---agent-wait-human-secs     default 10.0    # human-in-the-loop wait
---agent-wait-jitter         default 0.0     # 0 = deterministic
+--agent-wait-machine-secs  default 2.0   # FALLBACK only (calls with no recorded time)
+--agent-wait-human-secs    default 0.0   # 0 = autonomous batch
+--agent-wait-jitter        default 0.0   # CV of the simulated/fallback waits
+--agent-wait-scale         default 1.0   # multiply the inter-call wait; 0 disables
 ```
 
-**Where each wait fires**:
+**Scaling replay speed**: `--agent-wait-scale` multiplies whatever the
+inter-call (machine) wait resolves to — recorded or fallback. `0` removes all
+inter-call waits (max load), `0.5` runs replay at ~2× speed, `1.0` is true to
+the trace.
 
-| wait | inserted where |
-|---|---|
-| **machine** | after every assistant turn within a trace / session (≈ tool execution time) |
-| **human** | at session boundaries — between two traces, or when a new session is spun up — (≈ user reviewing & dispatching the next task) |
-
-**Jitter**: variation coefficient (CV = std/mean) for a Gamma-distributed
-wait. `jitter=0` collapses to exactly `mean` seconds. `jitter=1.0` is the
-classic Poisson inter-arrival (exponential). Floor 0.05 s for machine, 1 s
-for human; cap 300 s.
+**Simulated/fallback waits** are Gamma-distributed: `jitter=0` collapses to
+exactly `mean`; `jitter=1.0` is the classic Poisson (exponential); `>1` is
+long-tail. Floor 0.05 s machine / 1 s human; cap 300 s (recorded waits are
+capped at 300 s as well).
 
 ```
 sampled_wait ~ Gamma(shape = 1 / jitter², scale = mean × jitter²)
@@ -218,30 +230,28 @@ sampled_wait ~ Gamma(shape = 1 / jitter², scale = mean × jitter²)
 
 **Recommended values**:
 
-| Scenario | machine | human | jitter |
-|---|---|---|---|
-| CI / reproducible run (deterministic) | 2.0 | 10.0 | 0.0 |
-| Realistic but smooth | 2.0 | 10.0 | 0.3 |
-| Realistic burst (Poisson) | 2.0 | 10.0 | 1.0 |
-| Long-tail human review | 3.0 | 30.0 | 1.5 |
+| Scenario | machine (fallback) | human | jitter | scale |
+|---|---|---|---|---|
+| Faithful replay (default) | 2.0 | 0 | 0.0 | 1.0 |
+| Max load / stress (no waits) | 2.0 | 0 | 0.0 | 0.0 |
+| Faster-than-real replay | 2.0 | 0 | 0.0 | 0.5 |
+| Human-supervised product | 2.0 | 30–60 | 1.0 | 1.0 |
 
-Set either knob to `0` to disable that wait entirely. To pin a single
-deterministic delay (no human/machine split), use `--agent-wait-machine-secs N
---agent-wait-human-secs 0 --agent-wait-jitter 0`.
-
-**Configured via YAML**: the three wait knobs live in the workload YAML so a
-run is fully reproducible from a single config file. CLI flags override the
-YAML; if neither is given, code defaults (2.0 / 10.0 / 0.0) apply.
+**Configured via YAML**: all four knobs live in the workload YAML. CLI flags
+override the YAML; if neither is given, code defaults (2.0 / 0.0 / 0.0 / 1.0)
+apply.
 
 ```yaml
 # agent/workloads/<profile>.yaml
 workload:
   # ... existing fields ...
 
-  # Interactive wait between turns (dataset-replay mode)
-  agent_wait_machine_secs: 2.0     # tool / compile / test return latency
-  agent_wait_human_secs:   10.0    # human review / next-task dispatch
+  # Inter-call waits (dataset-replay mode). Machine wait prefers the trace's
+  # recorded tool wall-time; these cover fallback gaps and scaling.
+  agent_wait_machine_secs: 2.0     # fallback when no recorded wall-time
+  agent_wait_human_secs:   0.0     # human review gap; 0 = autonomous
   agent_wait_jitter:       0.0     # CV; 0=deterministic, 1.0=Poisson, >1=long-tail
+  agent_wait_scale:        1.0     # multiplier on the inter-call wait; 0 disables
 ```
 
 Resolution order (highest wins):

@@ -554,8 +554,9 @@ uses the K-th assistant turn's recorded length as `max_tokens`, so the server
 sees the real growing-prefix shape of a working coding agent.
 
 A fixed pool of `--agent-concurrency` walkers each pick a trace round-robin and
-replay it call by call, inserting interactive waits between calls (machine,
-after each assistant turn) and at trace boundaries (human):
+replay it call by call. Between calls it waits the trace's **recorded tool
+wall-time** (falling back to a simulated wait when none was recorded); at trace
+boundaries it inserts the human wait (default 0):
 
 ```bash
 python3 agent_throughput.py \
@@ -573,14 +574,20 @@ python3 agent_throughput.py \
 | `--agent-dataset-split` | `train` | split to load |
 | `--agent-num-traces` | `0` | traces to load (`0` = whole split) |
 | `--agent-concurrency` | `8` | concurrent trace walkers |
-| `--agent-wait-machine-secs` | `2.0` | wait after each assistant turn within a trace |
-| `--agent-wait-human-secs` | `10.0` | wait at trace boundaries |
-| `--agent-wait-jitter` | `0.0` | wait CV (0=deterministic, 1.0=Poisson, >1=long-tail) |
+| `--agent-wait-machine-secs` | `2.0` | **fallback** machine wait for calls with no recorded tool wall-time |
+| `--agent-wait-human-secs` | `0.0` | human wait at trace boundaries (0 = autonomous batch) |
+| `--agent-wait-jitter` | `0.0` | CV for the simulated/fallback waits (0=deterministic, 1.0=Poisson, >1=long-tail) |
+| `--agent-wait-scale` | `1.0` | multiplier on the inter-call machine wait (recorded or fallback); 0 disables |
 
-All seven knobs also resolve from a `--workload-config` YAML (CLI overrides
-YAML). The wait is Gamma-distributed: `Gamma(shape=1/jitter², scale=mean·jitter²)`
-so `E=mean`, `CV=jitter`; floors are 0.05 s (machine) / 1 s (human), cap 300 s.
-The assistant turns in the dataset are length-preserving placeholders — prefill
+All eight knobs also resolve from a `--workload-config` YAML (CLI overrides
+YAML). **Machine wait between calls replays the trace's recorded tool wall-time**
+(`Wall time: …` / `"duration_seconds"`; ~92% of gaps in the default dataset);
+calls with no recorded time fall back to a Gamma-distributed simulated wait
+(`Gamma(shape=1/jitter², scale=mean·jitter²)`, `E=mean`, `CV=jitter`; floor
+0.05 s, cap 300 s). `--agent-wait-scale` multiplies the resulting gap (0 = no
+waits / max load). The human wait at trace boundaries defaults to 0 because the
+codex dataset is a fully autonomous agent (every "human" turn is a tool result,
+not a person). The assistant turns are length-preserving placeholders — prefill
 / decode token counts are the load-bearing quantities, and the decoded text is
 server-generated anyway. The dataset is fetched via `datasets`; point `HF_HOME`
 at a volume with free disk if your default cache is small.
