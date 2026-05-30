@@ -12,7 +12,7 @@ like on the wire.
 | `agent-bench viewer …` | live Dash/Plotly dashboard over `benchmarks/`. Requires the `viewer` extras. Backed by `agent.viewer:main`. |
 
 Run `agent-bench <subcommand> --help` for that subcommand's flags. The
-`agent` subcommand has its own `--mode {traffic-replay,realistic,preview}`
+`agent` subcommand has its own `--mode {traffic-replay,realistic,preview,dataset-replay}`
 for in-mode variations.
 
 `agent-bench` is the only console script the wheel installs. Bare flags with
@@ -170,17 +170,18 @@ All flags can also be set under `workload:` in a `--workload-config` YAML
 (CLI overrides YAML). The dataset is loaded via HuggingFace `datasets`; point
 `HF_HOME` at a volume with free disk if your default cache is small.
 
-Measured properties of `Inferact/codex_swebenchpro_traces` (100-trace sample,
-char-count proxy — confirms the dataset card's 94.2% self-report):
+Measured properties of `Inferact/codex_swebenchpro_traces` (full 610-trace
+dataset; cache-hit ratios use a char-count proxy, lengths tokenized with a
+GLM-5.1 tokenizer — consistent with the dataset card's 94.2% self-report):
 
 | metric | value |
 |---|---|
-| Aggregate ideal cache hit | **95.6 %** |
-| Per-trial cache hit p10 / p50 / p90 | 87.8 % / 93.2 % / 97.0 % |
-| LLM calls per trace | p50 21, mean 27, max 64 |
-| Mean prompt length | ~70K tokens |
-| First-call prompt length | ~12.5K tokens |
-| Generation length p50 | ~280 tokens |
+| Aggregate ideal cache hit | **96.5 %** |
+| Per-trial cache hit p10 / p50 / p90 | 91.2 % / 96.1 % / 98.1 % |
+| LLM calls per trace | p50 30, mean 33, max 100 (20,230 total) |
+| Mean prompt length | ~63K tokens |
+| First-call prompt length | ~12.8K tokens |
+| Generation length p50 | ~260 tokens |
 
 The assistant turns in the dataset are length-preserving Lorem-ipsum
 placeholders (Inferact redacted the generated text). For benchmarking this is
