@@ -153,8 +153,14 @@ agent-bench agent \
   --server http://localhost:8001 --model your/model \
   --tokenizer your/tokenizer \
   --agent-concurrency 8 \
+  --agent-session-salt-tokens 256 \
   --ramp-duration 0 --sustain-duration 300
 ```
+
+`--agent-session-salt-tokens 256` gives every replay a unique prefix so the KV
+working set grows past the engine's L1 cache and exercises the external KV tier
+(see [Reaching the external KV cache](#reaching-the-external-kv-cache)). Drop it
+to `0` for a pure, byte-faithful replay.
 
 | flag | default | meaning |
 |---|---|---|
@@ -166,10 +172,38 @@ agent-bench agent \
 | `--agent-wait-human-secs` | `0.0` | human wait at trace boundaries (`0` = autonomous batch, the codex dataset's true shape) |
 | `--agent-wait-jitter` | `0.0` | CV for the simulated/fallback waits (0=deterministic, 1.0=Poisson) |
 | `--agent-wait-scale` | `1.0` | multiplier on the inter-call machine wait (recorded or fallback); `0` disables, `<1` speeds up replay |
+| `--agent-session-salt-tokens` | `0` | prepend a unique per-replay session id (~N tokens); `0` = off. See [Reaching the external KV cache](#reaching-the-external-kv-cache) |
 
 All flags can also be set under `workload:` in a `--workload-config` YAML
 (CLI overrides YAML). The dataset is loaded via HuggingFace `datasets`; point
 `HF_HOME` at a volume with free disk if your default cache is small.
+
+### Reaching the external KV cache
+
+The full 610-trace dataset is *small*: its entire KV working set is only
+~8.5 GB. On a server whose first-tier (L1 / GPU+host) prefix cache is larger
+than that, **the whole dataset fits in L1 and nothing ever spills to the
+external KV tier** — in steady state the external `gets` stay at 0, and a
+reported "external hit ~84–85%" is really the L1 hit, not external reads.
+
+Worse, the round-robin walkers replay the same traces over and over; after the
+first pass every re-replay is byte-identical, so it dedups to the same cached
+blocks and the working set never grows.
+
+`--agent-session-salt-tokens N` fixes this by prepending a **unique per-replay
+session id** (a uuid padded to ~N tokens) as a leading system message:
+
+- The salt is **constant across one replay's calls**, so the within-trace
+  growing-prefix cache hits are preserved exactly (turn K still reuses turn
+  K-1's prefix).
+- The salt **differs across replays/traces**, so each replay produces a fresh
+  KV chain that no longer dedups. The working set grows with traffic until it
+  exceeds L1 and starts reading the external tier — which is what you want to
+  benchmark.
+
+Set it to roughly the unique-prefix size a real deployment carries per session
+(e.g. 64–256). `0` (default) keeps pure dataset replay. Larger values fill L1
+faster.
 
 Measured properties of `Inferact/codex_swebenchpro_traces` (full 610-trace
 dataset; cache-hit ratios use a char-count proxy, lengths tokenized with a
@@ -252,6 +286,7 @@ workload:
   agent_wait_human_secs:   0.0     # human review gap; 0 = autonomous
   agent_wait_jitter:       0.0     # CV; 0=deterministic, 1.0=Poisson, >1=long-tail
   agent_wait_scale:        1.0     # multiplier on the inter-call wait; 0 disables
+  agent_session_salt_tokens: 0     # unique per-replay prefix (~N tok); 0=off, grows working set past L1
 ```
 
 Resolution order (highest wins):

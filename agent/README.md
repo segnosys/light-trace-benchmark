@@ -564,9 +564,14 @@ python3 agent_throughput.py \
   --server http://localhost:8001 --model qwen3-30b-a3b-nvfp4 \
   --tokenizer Qwen/Qwen3-30B-A3B \
   --agent-concurrency 8 \
+  --agent-session-salt-tokens 256 \
   --ramp-duration 0 --sustain-duration 300 \
   --name codex-replay --data-dir ./benchmarks
 ```
+
+`--agent-session-salt-tokens 256` makes each replay a unique KV chain so the
+working set outgrows L1 and reaches the external cache (see the note below);
+use `0` for a pure byte-faithful replay.
 
 | flag | default | meaning |
 |---|---|---|
@@ -578,8 +583,9 @@ python3 agent_throughput.py \
 | `--agent-wait-human-secs` | `0.0` | human wait at trace boundaries (0 = autonomous batch) |
 | `--agent-wait-jitter` | `0.0` | CV for the simulated/fallback waits (0=deterministic, 1.0=Poisson, >1=long-tail) |
 | `--agent-wait-scale` | `1.0` | multiplier on the inter-call machine wait (recorded or fallback); 0 disables |
+| `--agent-session-salt-tokens` | `0` | prepend a unique per-replay session id (~N tokens); 0 = off |
 
-All eight knobs also resolve from a `--workload-config` YAML (CLI overrides
+All nine knobs also resolve from a `--workload-config` YAML (CLI overrides
 YAML). **Machine wait between calls replays the trace's recorded tool wall-time**
 (`Wall time: …` / `"duration_seconds"`; ~92% of gaps in the default dataset);
 calls with no recorded time fall back to a Gamma-distributed simulated wait
@@ -591,6 +597,17 @@ not a person). The assistant turns are length-preserving placeholders — prefil
 / decode token counts are the load-bearing quantities, and the decoded text is
 server-generated anyway. The dataset is fetched via `datasets`; point `HF_HOME`
 at a volume with free disk if your default cache is small.
+
+**Reaching the external KV cache.** The whole 610-trace dataset is only
+~8.5 GB of KV, so on a server whose L1 prefix cache is bigger it all fits in L1
+and the external tier never sees a `get` (a reported "external hit" is really
+the L1 hit). Round-robin re-replays are byte-identical and dedup to the same
+blocks, so the working set never grows. `--agent-session-salt-tokens N`
+prepends a **unique per-replay session id** (uuid padded to ~N tokens) as a
+leading system message: constant across one replay's calls (within-trace cache
+hits preserved), unique across replays (each replay is a fresh KV chain that no
+longer dedups), so the working set grows past L1 and exercises the external
+cache. Use ~64–256; `0` keeps pure dataset replay.
 
 ---
 

@@ -2738,6 +2738,7 @@ async def run_dataset_replay(
     wait_human_secs: float,
     wait_jitter: float,
     wait_scale: float = 1.0,
+    session_salt_tokens: int = 0,
     api_key: str = None,
     window_size: float = 15.0,
     acc_len: float = 3.0,
@@ -2759,8 +2760,41 @@ async def run_dataset_replay(
     wall-time when available, else a simulated machine wait
     (`wait_machine_secs`/`wait_jitter`); `wait_scale` multiplies that gap. A
     human wait (`wait_human_secs`, default 0) is inserted at trace boundaries.
+
+    `session_salt_tokens > 0` prepends a unique per-replay session id (uuid +
+    padding to ~that many tokens) as a leading system message. The salt is
+    constant across one replay's calls so the within-trace growing-prefix
+    cache hits are preserved, but differs across replays/traces so the KV
+    working set no longer dedups down to the raw dataset (~8.5 GB) — it grows
+    past the engine's L1 cache and actually exercises the external KV tier.
     """
     traces = load_agent_traces(dataset, dataset_split, num_traces, tokenizer)
+
+    # Per-replay session salt: a unique prefix that defeats cross-replay KV
+    # dedup so the working set exceeds L1 and reaches the external cache tier.
+    salt_enabled = session_salt_tokens > 0
+    _salt_header = "<session-id>{sid}</session-id>\n"
+    if salt_enabled:
+        _hdr_tokens = len(tokenizer.encode(
+            _salt_header.format(sid=uuid.uuid4().hex), add_special_tokens=False))
+        # Token-exact padding: make_filler's char heuristic overshoots token
+        # count for random ASCII, so encode+trim to the precise target.
+        _pad_target = max(0, session_salt_tokens - _hdr_tokens)
+        _pad_ids = tokenizer.encode(make_filler(_pad_target, tokenizer),
+                                    add_special_tokens=False)[:_pad_target]
+        _salt_padding = tokenizer.decode(_pad_ids)
+    else:
+        _salt_padding = ""
+
+    def make_replay_salt() -> str:
+        if not salt_enabled:
+            return ""
+        return _salt_header.format(sid=uuid.uuid4().hex) + _salt_padding
+
+    # Representative salt token count for prompt/cache accounting (uuid hex is
+    # fixed-length, so this is stable across replays).
+    salt_tokens = (len(tokenizer.encode(make_replay_salt(), add_special_tokens=False))
+                   if salt_enabled else 0)
 
     metrics = BenchMetrics()
     sessions: List[ChatSession] = []  # unused here; satisfies save_metrics_loop signature
@@ -2786,6 +2820,7 @@ async def run_dataset_replay(
             "wait_human_secs": wait_human_secs,
             "wait_jitter": wait_jitter,
             "wait_scale": wait_scale,
+            "session_salt_tokens": session_salt_tokens,
             "num_gpus": num_gpus,
             "acc_len": acc_len,
             "mtp_overhead_factor": mtp_overhead_factor,
@@ -2802,7 +2837,7 @@ async def run_dataset_replay(
         trace_cursor["i"] += 1
         return t
 
-    async def send_call(http_session, trace: dict, k: int) -> bool:
+    async def send_call(http_session, trace: dict, k: int, salt: str = "") -> bool:
         """Send the K-th (1-indexed) LLM call of `trace`."""
         metrics.requests_sent += 1
         turns = trace["turns"]
@@ -2810,11 +2845,14 @@ async def run_dataset_replay(
         # prompt = first 2K-1 turns (ends on a user turn)
         prompt_turns = turns[: 2 * k - 1]
         messages = [{"role": r, "content": c} for r, c in prompt_turns]
+        if salt:
+            messages = [{"role": "system", "content": salt}] + messages
 
-        planned_prompt = sum(turn_tokens[: 2 * k - 1])
+        planned_prompt = sum(turn_tokens[: 2 * k - 1]) + salt_tokens
         # Ideal cacheable prefix = what the previous call already established:
-        # turns[0:2k-2]. Zero for the first call in a trace.
-        prefix_tokens = 0 if k <= 1 else sum(turn_tokens[: 2 * k - 2])
+        # turns[0:2k-2], plus the salt (sent on call k-1). Zero for the first
+        # call in a trace — there the salt is brand-new and not yet cached.
+        prefix_tokens = 0 if k <= 1 else sum(turn_tokens[: 2 * k - 2]) + salt_tokens
         # max_tokens = recorded length of the K-th assistant turn (index 2k-1)
         gen_len = max(1, turn_tokens[2 * k - 1])
 
@@ -2931,10 +2969,11 @@ async def run_dataset_replay(
             await asyncio.sleep((walker_id / concurrency) * ramp_duration_secs)
         while time.time() - start_wall < total_duration:
             trace = next_trace()
+            salt = make_replay_salt()  # fresh per replay; constant across its calls
             for k in range(1, trace["num_calls"] + 1):
                 if time.time() - start_wall >= total_duration:
                     return
-                await send_call(http_session, trace, k)
+                await send_call(http_session, trace, k, salt)
                 if k < trace["num_calls"]:
                     rec = trace["tool_waits"][k - 1]
                     if rec is not None:
@@ -2955,6 +2994,11 @@ async def run_dataset_replay(
     print(f"Concurrency: {concurrency} walkers")
     print(f"Waits: machine=recorded tool wall-time (fallback {wait_machine_secs}s, jitter={wait_jitter}), "
           f"scale={wait_scale}x, human={wait_human_secs}s")
+    if salt_enabled:
+        print(f"Session salt: unique per-replay prefix ~{salt_tokens} tokens "
+              f"(defeats cross-replay KV dedup -> exercises external cache)")
+    else:
+        print("Session salt: off (pure dataset replay; KV may fit entirely in L1)")
     print(f"Duration: ramp={ramp_duration_secs}s + sustain={sustain_duration_secs}s")
     print(f"{Colors.DIM}{'='*80}{Colors.END}\n")
 
@@ -3081,6 +3125,7 @@ WORKLOAD_CONFIG_PARAMS = [
     "agent_wait_human_secs",
     "agent_wait_jitter",
     "agent_wait_scale",
+    "agent_session_salt_tokens",
 ]
 
 
@@ -3699,6 +3744,8 @@ def main():
                        help="[Dataset replay] CV for the simulated/fallback waits; 0=deterministic, 1.0=Poisson, >1=long-tail (default: 0.0)")
     parser.add_argument("--agent-wait-scale", type=float, default=1.0,
                        help="[Dataset replay] Multiplier on the inter-call machine wait (recorded or fallback); 0 disables, <1 speeds up replay (default: 1.0)")
+    parser.add_argument("--agent-session-salt-tokens", type=int, default=0,
+                       help="[Dataset replay] Prepend a unique per-replay session id (~N tokens) so each replay's KV no longer dedups; grows the working set past L1 to exercise the external cache. 0 = off, pure dataset replay (default: 0)")
 
     # Realistic mode arguments
     parser.add_argument("--think-time-mean", type=float, default=10.0,
@@ -3834,6 +3881,7 @@ def main():
             wait_human_secs=args.agent_wait_human_secs,
             wait_jitter=args.agent_wait_jitter,
             wait_scale=args.agent_wait_scale,
+            session_salt_tokens=args.agent_session_salt_tokens,
             api_key=args.api_key,
             window_size=args.window,
             acc_len=args.acc_len,
