@@ -702,7 +702,7 @@ python3 agent/build_agent_corpus.py \
     --out /scratch/agent_corpus_mymodel.json
 ```
 
-The tool defaults to `/mnt/vast/jiejing/sglang-fork` for the code root
+The tool defaults to `/path/to/sglang-fork` for the code root
 and skips files outside `[200B, 60KB]`. Adjust `--max-files` if you
 want a larger corpus.
 

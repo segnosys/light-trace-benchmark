@@ -5,8 +5,8 @@ Run once; consumers (agent-bench) load the JSON and slice deterministically.
 
 Usage:
     python3 build_agent_corpus.py \
-        --tokenizer /mnt/vast/john/huggingface/MiniMax-M2.5 \
-        --out /mnt/vast/jiejing/agent_corpus.json
+        --tokenizer /path/to/MiniMax-M2.5 \
+        --out /path/to/agent_corpus.json
 """
 import argparse
 import glob
@@ -112,7 +112,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--code-root", default="/mnt/vast/jiejing/sglang-fork")
+    ap.add_argument("--code-root", default="/path/to/sglang-fork")
     ap.add_argument("--max-files", type=int, default=600)
     args = ap.parse_args()
     build(args.tokenizer, args.out, args.code_root, args.max_files)

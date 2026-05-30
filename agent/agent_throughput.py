@@ -3581,8 +3581,8 @@ def main():
                        help="Initial queries per second (default: 1.0)")
     parser.add_argument("--max-qps", type=float, default=20.0,
                        help="Maximum queries per second (default: 20.0)")
-    parser.add_argument("--ramp-duration", type=float, default=60.0,
-                       help="Ramp duration in seconds (default: 60)")
+    parser.add_argument("--ramp-duration", type=float, default=40.0,
+                       help="Ramp duration in seconds (default: 40)")
     parser.add_argument("--sustain-duration", type=float, default=60.0,
                        help="Sustain duration at max QPS in seconds (default: 60)")
     parser.add_argument("--system-prompt-len", type=int, default=20000,

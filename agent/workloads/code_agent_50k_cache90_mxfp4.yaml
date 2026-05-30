@@ -38,7 +38,7 @@ workload:
   acc_len:             1.0
   mtp_overhead_factor: 1.0
   mtp_draft_tokens:    3
-  tokenizer:           /mnt/vast/john/huggingface/MiniMax-M2.5-MXFP4
+  tokenizer:           /path/to/MiniMax-M2.5-MXFP4
   gpus:                2
   window:              30
 
